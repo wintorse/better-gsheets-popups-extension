@@ -3,8 +3,8 @@
 
   const css = `
     .docos-anchoreddocoview {
-      width: 40vw !important;
-      min-width: 280px !important;
+      width: 32vw !important;
+      min-width: 240px !important;
       max-width: none !important;
     }
     .docos-anchoreddocoview-internal,
