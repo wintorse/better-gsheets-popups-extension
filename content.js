@@ -167,6 +167,9 @@
   // ── 編集履歴ポップアップ: 差分をgit-diff風に再描画 ───────────────────────
 
   const BLAME_DIFF_ATTR = "data-widen-diff-rendered";
+  const BLAME_DIFF_LAYOUT_KEY = "widen-ext-blame-diff-layout";
+  const BLAME_DIFF_TOGGLE_CLASS = "widen-diff-layout-toggle";
+  const BLAME_DIFF_TOGGLE_ROW_CLASS = "widen-diff-layout-toggle-row";
 
   const blameDiffCSS = `
     .widen-diff-block {
@@ -177,30 +180,87 @@
       word-break: break-all;
       border-radius: 3px;
       overflow: hidden;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      border: 1px solid #e1e1e1;
+    }
+    :root[data-widen-diff-layout="horizontal"] .widen-diff-replacement {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    }
+    :root[data-widen-diff-layout="horizontal"] .widen-diff-replacement .widen-diff-row {
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
+    .widen-diff-row {
+      padding: 4px 8px;
+      display: block;
+      font-style: normal !important;
     }
     .widen-diff-del {
       background: #ffeef0;
       color: #b31d28;
-      padding: 4px 8px;
-      display: block;
       border-left: 3px solid #f97583;
-      font-style: normal !important;
     }
     .widen-diff-add {
       background: #e6ffed;
       color: #22863a;
-      padding: 4px 8px;
-      display: block;
       border-left: 3px solid #34d058;
-      font-style: normal !important;
     }
     .widen-diff-neutral {
       background: #f6f8fa;
       color: #24292e;
-      padding: 4px 8px;
-      display: block;
       border-left: 3px solid #959da5;
-      font-style: normal !important;
+    }
+    .widen-diff-token-del {
+      background: #ffd7d5;
+      color: #82071e;
+      border-radius: 2px;
+      text-decoration: line-through;
+    }
+    .widen-diff-token-add {
+      background: #aceebb;
+      color: #116329;
+      border-radius: 2px;
+    }
+    .${BLAME_DIFF_TOGGLE_ROW_CLASS} {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      width: 100%;
+      box-sizing: border-box;
+    }
+    .${BLAME_DIFF_TOGGLE_ROW_CLASS} > .docs-blame-bold-text {
+      min-width: 0;
+    }
+    .${BLAME_DIFF_TOGGLE_CLASS} {
+      width: 24px;
+      height: 24px;
+      padding: 3px;
+      border: 1px solid #e1e1e1;
+      border-radius: 4px;
+      background: #fff;
+      color: #3c4043;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      box-sizing: border-box;
+      flex: 0 0 auto;
+      z-index: 1;
+    }
+    .${BLAME_DIFF_TOGGLE_CLASS}:hover {
+      background: #f1f3f4;
+      border-color: #bdc1c6;
+    }
+    .${BLAME_DIFF_TOGGLE_CLASS}:focus-visible {
+      outline: 2px solid #1a73e8;
+      outline-offset: 1px;
+    }
+    .${BLAME_DIFF_TOGGLE_CLASS} svg {
+      width: 16px;
+      height: 16px;
+      pointer-events: none;
     }
   `;
 
@@ -215,9 +275,209 @@
 
   injectBlameDiffStyle(document);
 
+  const readStoredDiffLayout = () => {
+    try {
+      return localStorage.getItem(BLAME_DIFF_LAYOUT_KEY) === "horizontal"
+        ? "horizontal"
+        : "vertical";
+    } catch {
+      return "vertical";
+    }
+  };
+
+  const writeStoredDiffLayout = (layout) => {
+    try {
+      localStorage.setItem(BLAME_DIFF_LAYOUT_KEY, layout);
+    } catch {}
+  };
+
+  const setDiffLayout = (doc, layout) => {
+    doc.documentElement.setAttribute("data-widen-diff-layout", layout);
+  };
+
+  setDiffLayout(document, readStoredDiffLayout());
+
+  const getJsDiff = () => globalThis.Diff ?? null;
+
+  const appendText = (doc, parent, text, className = "") => {
+    if (!text) return;
+    const node = className
+      ? doc.createElement("span")
+      : doc.createTextNode(text);
+    if (className) {
+      node.className = className;
+      node.textContent = text;
+    }
+    parent.appendChild(node);
+  };
+
+  const createDiffRow = (doc, type, parts) => {
+    const row = doc.createElement("span");
+    row.className = `widen-diff-row widen-diff-${type}`;
+
+    for (const part of parts) {
+      if (type === "del" && part.added) continue;
+      if (type === "add" && part.removed) continue;
+      const tokenClass =
+        type === "del" && part.removed
+          ? "widen-diff-token-del"
+          : type === "add" && part.added
+            ? "widen-diff-token-add"
+            : "";
+      appendText(doc, row, part.value, tokenClass);
+    }
+
+    return row;
+  };
+
+  const createReplacementDiffBlock = (doc, oldText, newText) => {
+    const block = doc.createElement("div");
+    block.className = "widen-diff-block widen-diff-replacement";
+
+    const diff = getJsDiff();
+    const parts = diff?.diffWordsWithSpace?.(oldText, newText) ?? [
+      { value: oldText, removed: true },
+      { value: newText, added: true },
+    ];
+
+    block.appendChild(createDiffRow(doc, "del", parts));
+    block.appendChild(createDiffRow(doc, "add", parts));
+    return block;
+  };
+
+  const renderLayoutIcon = (layout) => {
+    if (layout === "horizontal") {
+      return `
+        <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+          <rect x="2.5" y="3" width="4.5" height="10" rx="1" fill="none" stroke="currentColor" stroke-width="1.3"/>
+          <rect x="9" y="3" width="4.5" height="10" rx="1" fill="none" stroke="currentColor" stroke-width="1.3"/>
+        </svg>`;
+    }
+
+    return `
+      <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+        <rect x="3" y="2.5" width="10" height="4.5" rx="1" fill="none" stroke="currentColor" stroke-width="1.3"/>
+        <rect x="3" y="9" width="10" height="4.5" rx="1" fill="none" stroke="currentColor" stroke-width="1.3"/>
+      </svg>`;
+  };
+
+  const updateDiffLayoutButtons = (doc) => {
+    const layout =
+      doc.documentElement.getAttribute("data-widen-diff-layout") || "vertical";
+    doc.querySelectorAll(`.${BLAME_DIFF_TOGGLE_CLASS}`).forEach((button) => {
+      button.innerHTML = renderLayoutIcon(layout);
+      button.title =
+        layout === "horizontal" ? "差分を縦に並べる" : "差分を横に並べる";
+      button.setAttribute(
+        "aria-label",
+        layout === "horizontal" ? "差分を縦に並べる" : "差分を横に並べる",
+      );
+      button.setAttribute("aria-pressed", String(layout === "horizontal"));
+    });
+  };
+
+  const toggleDiffLayout = (doc) => {
+    const current =
+      doc.documentElement.getAttribute("data-widen-diff-layout") || "vertical";
+    const next = current === "horizontal" ? "vertical" : "horizontal";
+    setDiffLayout(doc, next);
+    writeStoredDiffLayout(next);
+    updateDiffLayoutButtons(doc);
+  };
+
+  const addDiffLayoutToggle = (target) => {
+    const valueContent =
+      target.closest?.(".docs-blameview-value-content") ?? target;
+    if (valueContent.querySelector(`.${BLAME_DIFF_TOGGLE_CLASS}`)) return;
+
+    const doc = valueContent.ownerDocument;
+    const anchor = target.classList?.contains("docs-blame-bold-text")
+      ? target
+      : valueContent.querySelector(".docs-blame-bold-text");
+    if (!anchor) return;
+
+    injectBlameDiffStyle(doc);
+    if (!doc.documentElement.hasAttribute("data-widen-diff-layout")) {
+      setDiffLayout(doc, readStoredDiffLayout());
+    }
+
+    const button = doc.createElement("button");
+    button.type = "button";
+    button.className = BLAME_DIFF_TOGGLE_CLASS;
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      toggleDiffLayout(doc);
+    });
+
+    const row = doc.createElement("span");
+    row.className = BLAME_DIFF_TOGGLE_ROW_CLASS;
+    anchor.parentNode?.insertBefore(row, anchor);
+    row.appendChild(anchor);
+    row.appendChild(button);
+    updateDiffLayoutButtons(doc);
+  };
+
+  const observeDiffLayoutToggles = (root) => {
+    root
+      .querySelectorAll(".docs-blameview-value-content .docs-blame-bold-text")
+      .forEach(addDiffLayoutToggle);
+
+    const obs = new MutationObserver((mutations) => {
+      for (const mutation of mutations) {
+        for (const node of mutation.addedNodes) {
+          if (node.nodeType !== Node.ELEMENT_NODE) continue;
+          if (
+            node.classList?.contains("docs-blame-bold-text") &&
+            node.closest?.(".docs-blameview-value-content")
+          ) {
+            addDiffLayoutToggle(node);
+          }
+          node
+            .querySelectorAll?.(
+              ".docs-blameview-value-content .docs-blame-bold-text",
+            )
+            .forEach(addDiffLayoutToggle);
+        }
+      }
+    });
+
+    try {
+      obs.observe(root.body || root.documentElement, {
+        childList: true,
+        subtree: true,
+      });
+    } catch {}
+  };
+
+  const createSingleDiffBlock = (doc, type, content) => {
+    const block = doc.createElement("div");
+    block.className = "widen-diff-block";
+    const row = doc.createElement("span");
+    row.className = `widen-diff-row widen-diff-${type}`;
+
+    appendText(
+      doc,
+      row,
+      content,
+      type === "add"
+        ? "widen-diff-token-add"
+        : type === "del"
+          ? "widen-diff-token-del"
+          : "",
+    );
+    block.appendChild(row);
+    return block;
+  };
+
   // valueContent 内から旧テキスト・新テキストを抽出してgit-diff風に再描画
   const transformDiff = (valueContent) => {
     if (valueContent.hasAttribute(BLAME_DIFF_ATTR)) return;
+    if (valueContent.querySelector(".widen-diff-block")) {
+      valueContent.setAttribute(BLAME_DIFF_ATTR, "1");
+      addDiffLayoutToggle(valueContent);
+      return;
+    }
 
     // 直下テキストノードを順にたどる
     const childNodes = Array.from(valueContent.childNodes);
@@ -263,17 +523,12 @@
       });
       toRemove.forEach((n) => n.parentNode?.removeChild(n));
 
-      // git-diff ブロックを追加
-      const block = valueContent.ownerDocument.createElement("div");
-      block.className = "widen-diff-block";
-      const delLine = valueContent.ownerDocument.createElement("span");
-      delLine.className = "widen-diff-del";
-      delLine.textContent = "– " + oldText;
-      const addLine = valueContent.ownerDocument.createElement("span");
-      addLine.className = "widen-diff-add";
-      addLine.textContent = "+ " + newText;
-      block.appendChild(delLine);
-      block.appendChild(addLine);
+      const block = createReplacementDiffBlock(
+        valueContent.ownerDocument,
+        oldText,
+        newText,
+      );
+      if (actionSpan) addDiffLayoutToggle(actionSpan);
       valueContent.appendChild(block);
       return;
     }
@@ -298,13 +553,17 @@
       );
       toRemove.forEach((n) => n.parentNode?.removeChild(n));
 
-      // git-diff ブロックを追加（追加/削除の判別が難しいためグレーで統一）
-      const block = valueContent.ownerDocument.createElement("div");
-      block.className = "widen-diff-block";
-      const line = valueContent.ownerDocument.createElement("span");
-      line.className = "widen-diff-neutral";
-      line.textContent = content;
-      block.appendChild(line);
+      const type = actionText.includes("追加")
+        ? "add"
+        : actionText.includes("削除")
+          ? "del"
+          : "neutral";
+      const block = createSingleDiffBlock(
+        valueContent.ownerDocument,
+        type,
+        content,
+      );
+      addDiffLayoutToggle(actionSpan);
       valueContent.appendChild(block);
     }
   };
@@ -347,6 +606,7 @@
   };
 
   observeDiff(document);
+  observeDiffLayoutToggles(document);
 
   // ── 編集履歴ポップアップ（.waffle-blameview）リサイズハンドル ──────────────
 
