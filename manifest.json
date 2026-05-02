@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "Widen Gsheets Comments Extension",
+  "name": "Better GSheets Popups Extension",
   "version": "1.0.0",
   "description": "Horizontal Comment Widener for Google Sheets",
   "content_scripts": [
