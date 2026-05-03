@@ -137,19 +137,20 @@
 
   observeIframes(document);
 
-  // コメントウィンドウが右端を超えないよう left を補正する
+  // popup が画面端を超えないよう位置と幅を補正する
+  const LEFT_EDGE_OFFSET = 16; // 左端に残す px
   const MARGIN = 16; // マージンとスクロールバー分を考慮した px
   const RIGHT_SIDEBAR_OFFSET = 56; // 右端メニューバー（56px）分
 
   /**
-   * popup が画面右端からはみ出す場合、left を左へ補正する。
+   * popup が画面端からはみ出す場合、left と width を補正する。
    *
    * @param {HTMLElement} el - 補正対象 popup。
    * @returns {void}
    */
-  const clampRightPosition = (el) => {
+  const clampPopupBounds = (el) => {
     const view = el.ownerDocument.defaultView ?? window;
-    const rect = el.getBoundingClientRect();
+    let rect = el.getBoundingClientRect();
     const overflowRight =
       rect.right - view.innerWidth + MARGIN + RIGHT_SIDEBAR_OFFSET;
     if (overflowRight > 0) {
@@ -160,15 +161,25 @@
         "important",
       );
     }
+
+    rect = el.getBoundingClientRect();
+    const overflowLeft = LEFT_EDGE_OFFSET - rect.left;
+    if (overflowLeft > 0) {
+      const currentLeft = parseFloat(el.style.left) || 0;
+      const nextLeft = currentLeft + overflowLeft;
+      const maxWidth = Math.max(0, rect.right - LEFT_EDGE_OFFSET);
+      el.style.setProperty("left", `${nextLeft}px`, "important");
+      el.style.setProperty("width", `${maxWidth}px`, "important");
+    }
   };
 
   /**
-   * コメント popup が画面右端からはみ出す場合、left を左へ補正する。
+   * コメント popup が画面端からはみ出す場合、left と width を補正する。
    *
    * @param {HTMLElement} el - `.docos-anchoreddocoview` 要素。
    * @returns {void}
    */
-  const clampPosition = clampRightPosition;
+  const clampPosition = clampPopupBounds;
 
   const renderResizeHandleIcon = () => `
     <svg width="14" height="14" viewBox="0 0 14 14" fill="none" xmlns="http://www.w3.org/2000/svg" style="transform:rotate(90deg)">
@@ -271,7 +282,7 @@
   };
 
   /**
-   * document 内の既存コメント popup すべてに右端はみ出し補正を適用する。
+   * document 内の既存コメント popup すべてに画面端はみ出し補正を適用する。
    *
    * @param {Document} root - 検索対象の document。
    * @returns {void}
@@ -1027,7 +1038,7 @@
       handleClass: BLAME_HANDLE_CLASS,
       minWidth: 200,
       minHeight: 120,
-      onResize: clampRightPosition,
+      onResize: clampPopupBounds,
     });
   };
 
