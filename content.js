@@ -18,10 +18,6 @@
     }
     .docos-anchoreddocoview-internal {
       max-height: none !important;
-      overflow: visible !important;
-    }
-    .docos-anchoreddocoview-content {
-      min-height: 0 !important;
       overflow: auto !important;
     }
     .docos-docoview-input-pane,
@@ -208,6 +204,7 @@
    * @param {string} options.handleClass - ハンドル要素に付ける class。
    * @param {number} options.minWidth - 最小幅 px。
    * @param {number} options.minHeight - 最小高さ px。
+   * @param {boolean} [options.resizeHeight=true] - 高さも変更するか。
    * @param {(el: HTMLElement) => HTMLElement} [options.getHeightTarget] - 高さを変更する要素。省略時は popup 自身。
    * @param {boolean} [options.syncMaxHeight=false] - 手動 height を max-height にも反映するか。
    * @param {(el: HTMLElement) => void} [options.onResize] - サイズ更新後に実行する処理。
@@ -219,6 +216,7 @@
       handleClass,
       minWidth,
       minHeight,
+      resizeHeight = true,
       getHeightTarget,
       syncMaxHeight = false,
       onResize,
@@ -263,17 +261,19 @@
         const dy = ev.clientY - startY;
 
         const newWidth = Math.max(minWidth, startWidth + dx);
-        const newHeight = Math.max(minHeight, startHeight + dy);
 
         el.style.setProperty("width", `${newWidth}px`, "important");
-        const heightValue = `${newHeight}px`;
-        heightTarget.style.setProperty("height", heightValue, "important");
-        if (syncMaxHeight) {
-          heightTarget.style.setProperty(
-            "max-height",
-            heightValue,
-            "important",
-          );
+        if (resizeHeight) {
+          const newHeight = Math.max(minHeight, startHeight + dy);
+          const heightValue = `${newHeight}px`;
+          heightTarget.style.setProperty("height", heightValue, "important");
+          if (syncMaxHeight) {
+            heightTarget.style.setProperty(
+              "max-height",
+              heightValue,
+              "important",
+            );
+          }
         }
         onResize?.(el);
       };
@@ -308,9 +308,7 @@
       handleClass: COMMENT_HANDLE_CLASS,
       minWidth: 240,
       minHeight: 160,
-      // コメント popup は入力欄なども含むため、高さ変更は本文 content だけに限定する。
-      getHeightTarget: (popup) =>
-        popup.querySelector(".docos-anchoreddocoview-content") ?? popup,
+      resizeHeight: false,
       onResize: clampPosition,
     });
   };
