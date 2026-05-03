@@ -11,12 +11,38 @@
    * - Google Sheets 内の同一 origin iframe への同じ処理の適用
    */
 
+  /**
+   * この拡張が各 document に注入する style 要素の id。
+   *
+   * 同じ content script が top document と iframe の両方で走るため、document ごとに
+   * 同じ CSS を二重注入しないためのキーとして使う。
+   *
+   * @type {{comment: string, diff: string, blameHandle: string}}
+   */
   const STYLE_IDS = {
     comment: "spreadsheet-wide-comment-style",
     diff: "widen-ext-blame-diff-style",
     blameHandle: "widen-ext-blame-handle-style",
   };
 
+  /**
+   * Google Sheets が生成する popup DOM を捕まえるための selector 集。
+   *
+   * 編集履歴 popup は `.waffle-blameview` を外枠に持ち、その中に
+   * `.docs-blameview-valuecontainer > .docs-blameview-value-content` が配置される。
+   * 値の変更内容は `.docs-blame-bold-text` の action label と text node の組み合わせで
+   * 表現されるため、diff 変換ではこの構造を前提に DOM を読む。
+   *
+   * @type {{
+   *   iframe: string,
+   *   commentPopup: string,
+   *   blamePopup: string,
+   *   blameView: string,
+   *   blameValueContainer: string,
+   *   blameValueContent: string,
+   *   blameBoldText: string
+   * }}
+   */
   const SELECTORS = {
     iframe: "iframe",
     commentPopup: ".docos-anchoreddocoview",
@@ -27,14 +53,73 @@
     blameBoldText: ".docs-blame-bold-text",
   };
 
+  /**
+   * コメント popup に追加するリサイズハンドルの class。
+   *
+   * @type {string}
+   */
   const COMMENT_HANDLE_CLASS = "widen-ext-comment-handle";
+
+  /**
+   * 編集履歴 popup に追加するリサイズハンドルの class。
+   *
+   * @type {string}
+   */
   const BLAME_HANDLE_CLASS = "widen-ext-blame-handle";
+
+  /**
+   * 編集履歴値を diff 表示へ変換済みかを示す data 属性名。
+   *
+   * MutationObserver が同じ `.docs-blameview-value-content` を何度も拾うため、
+   * 再変換による DOM の二重生成を防ぐ。
+   *
+   * @type {string}
+   */
   const BLAME_DIFF_ATTR = "data-widen-diff-rendered";
+
+  /**
+   * diff の縦並び・横並びを document root に保持する data 属性名。
+   *
+   * CSS 側では `:root[data-widen-diff-layout="horizontal"]` として参照する。
+   *
+   * @type {string}
+   */
   const BLAME_DIFF_LAYOUT_ATTR = "data-widen-diff-layout";
+
+  /**
+   * diff レイアウト設定を localStorage に保存するためのキー。
+   *
+   * @type {string}
+   */
   const BLAME_DIFF_LAYOUT_KEY = "widen-ext-blame-diff-layout";
+
+  /**
+   * 編集履歴の action label 横に追加する diff レイアウト切替ボタンの class。
+   *
+   * @type {string}
+   */
   const BLAME_DIFF_TOGGLE_CLASS = "widen-diff-layout-toggle";
+
+  /**
+   * action label と diff レイアウト切替ボタンを横並びにする wrapper の class。
+   *
+   * @type {string}
+   */
   const BLAME_DIFF_TOGGLE_ROW_CLASS = "widen-diff-layout-toggle-row";
 
+  /**
+   * popup が viewport からはみ出さないよう補正するときの余白設定。
+   *
+   * `rightSidebarOffset` は Google Sheets 右側メニューぶんを残すための値。
+   * `bottomEdgeOffset` は編集履歴 popup の下端に操作可能な余白を残すために使う。
+   *
+   * @type {{
+   *   leftEdgeOffset: number,
+   *   margin: number,
+   *   rightSidebarOffset: number,
+   *   bottomEdgeOffset: number
+   * }}
+   */
   const POPUP_BOUNDS = {
     leftEdgeOffset: 16,
     margin: 16,
@@ -42,19 +127,111 @@
     bottomEdgeOffset: 48,
   };
 
-  const COMMENT_MIN_WIDTH = 240;
-  const COMMENT_MIN_HEIGHT = 160;
-  const BLAME_DEFAULT_WIDTH = 320;
-  const BLAME_MIN_WIDTH = 200;
-  const BLAME_VALUE_MAX_HEIGHT = 240;
-  const BLAME_VALUE_MIN_HEIGHT = 120;
+  /**
+   * コメント popup をリサイズできる最小の幅 (px)。
+   *
+   * 元の Google Sheets の width に合わせている。
+   *
+   * @type {number}
+   */
+  const COMMENT_MIN_WIDTH = 282;
 
+  /**
+   * コメント popup をリサイズできる最小の高さ (px)。
+   *
+   * 現在コメント popup は横方向だけが手動変更可能だが、共通リサイズ API の必須値として
+   * 元の Google Sheets の最小の height を渡している。
+   *
+   * @type {number}
+   */
+  const COMMENT_MIN_HEIGHT = 103;
+
+  /**
+   * 編集履歴 popup を開き直したときに戻す初期幅 (px)。
+   *
+   * `.waffle-blameview` は閉じても DOM が残るため、手動リサイズ後の inline width を
+   * 次回表示へ持ち越さないようにする。
+   *
+   * @type {number}
+   */
+  const BLAME_DEFAULT_WIDTH = 320;
+
+  /**
+   * 編集履歴 popup の最小幅 (px)。
+   *
+   * 元々の Google Sheets の width に合わせている。
+   *
+   * @type {number}
+   */
+  const BLAME_MIN_WIDTH = 240;
+
+  /**
+   * 編集履歴本文領域の既定 max-height (px)。
+   *
+   * warning、feedback、navigation を含む popup 全体ではなく、
+   * `.docs-blameview-valuecontainer` だけをスクロール領域にする。
+   *
+   * @type {number}
+   */
+  const BLAME_VALUE_MAX_HEIGHT = 240;
+
+  /**
+   * 編集履歴本文領域の min-height (px)。
+   *
+   * @type {number}
+   */
+  const BLAME_VALUE_MIN_HEIGHT = 78;
+
+  /**
+   * setup 済み document を記録する。
+   *
+   * content script は `all_frames: true` で実行され、さらに同一 origin iframe も手動で
+   * 初期化するため、同じ document に observer を重複登録しないために使う。
+   *
+   * @type {WeakSet<Document>}
+   */
   const initializedDocuments = new WeakSet();
+
+  /**
+   * iframe 追加を監視済みの document を記録する。
+   *
+   * @type {WeakSet<Document>}
+   */
   const observedFrameDocuments = new WeakSet();
+
+  /**
+   * load listener を登録済みの iframe 要素を記録する。
+   *
+   * @type {WeakSet<HTMLIFrameElement>}
+   */
   const observedFrames = new WeakSet();
+
+  /**
+   * document ごとに、popup selector 単位の MutationObserver 登録状況を保持する。
+   *
+   * @type {WeakMap<Document, Set<string>>}
+   */
   const observedPopupSelectors = new WeakMap();
+
+  /**
+   * 編集履歴 diff 変換用 observer を登録済みの document を記録する。
+   *
+   * @type {WeakSet<Document>}
+   */
   const observedDiffDocuments = new WeakSet();
+
+  /**
+   * diff レイアウト切替ボタン補完用 observer を登録済みの document を記録する。
+   *
+   * @type {WeakSet<Document>}
+   */
   const observedDiffToggleDocuments = new WeakSet();
+
+  /**
+   * requestAnimationFrame による編集履歴 popup 下端補正を予約済みの要素。
+   *
+   * @type {WeakSet<HTMLElement>}
+   */
   const scheduledBlameBottomClamps = new WeakSet();
 
   /**
@@ -90,6 +267,11 @@
     }
   `;
 
+  /**
+   * コメント popup の幅拡張、本文折り返し、リサイズハンドルに必要な CSS。
+   *
+   * @type {string}
+   */
   const commentCSS = `
     .docos-anchoreddocoview {
       min-width: 300px !important;
@@ -120,6 +302,14 @@
     ${createResizeHandleCSS(COMMENT_HANDLE_CLASS)}
   `;
 
+  /**
+   * 編集履歴値を git diff 風に表示するための CSS。
+   *
+   * `.widen-diff-replacement` は通常は削除行・追加行を縦に並べる。
+   * document root の `data-widen-diff-layout` が `"horizontal"` のときだけ横並びにする。
+   *
+   * @type {string}
+   */
   const diffCSS = `
     .widen-diff-block {
       margin-top: 6px;
@@ -213,6 +403,14 @@
     }
   `;
 
+  /**
+   * 編集履歴 popup の幅追従、本文スクロール、リサイズハンドルに必要な CSS。
+   *
+   * 元の DOM では `.docs-blameview-valuecontainer` が編集値の本文領域なので、
+   * popup 全体ではなくこの要素だけを高さ変更・スクロール対象にしている。
+   *
+   * @type {string}
+   */
   const blameHandleCSS = `
     .waffle-blameview {
       overflow: hidden !important;
@@ -276,9 +474,9 @@
    */
   const forEachMatchedElement = (root, selector, callback) => {
     if (root.matches?.(selector)) callback(/** @type {HTMLElement} */ (root));
-    root.querySelectorAll?.(selector).forEach((element) =>
-      callback(/** @type {HTMLElement} */ (element)),
-    );
+    root
+      .querySelectorAll?.(selector)
+      .forEach((element) => callback(/** @type {HTMLElement} */ (element)));
   };
 
   /**
@@ -374,9 +572,9 @@
   const observePopupInDoc = (doc, selector, syncPopup) => {
     if (!doc) return;
 
-    doc.querySelectorAll(selector).forEach((element) =>
-      syncPopup(/** @type {HTMLElement} */ (element)),
-    );
+    doc
+      .querySelectorAll(selector)
+      .forEach((element) => syncPopup(/** @type {HTMLElement} */ (element)));
 
     if (!markPopupObserver(doc, selector)) return;
 
@@ -403,9 +601,11 @@
             syncPopup(/** @type {HTMLElement} */ (parentPopup));
           }
 
-          node.querySelectorAll?.(selector).forEach((element) =>
-            syncPopup(/** @type {HTMLElement} */ (element)),
-          );
+          node
+            .querySelectorAll?.(selector)
+            .forEach((element) =>
+              syncPopup(/** @type {HTMLElement} */ (element)),
+            );
         }
       }
     });
@@ -504,7 +704,8 @@
   ) => {
     if (element.querySelector(`.${handleClass}`)) return;
 
-    const computed = element.ownerDocument.defaultView?.getComputedStyle(element);
+    const computed =
+      element.ownerDocument.defaultView?.getComputedStyle(element);
     if (computed?.position === "static") {
       element.style.position = "relative";
     }
@@ -948,7 +1149,9 @@
         .slice(0, fromIndex)
         .reverse()
         .find(isBlameValueNode);
-      const newValueNode = childNodes.slice(fromIndex + 1).find(isBlameValueNode);
+      const newValueNode = childNodes
+        .slice(fromIndex + 1)
+        .find(isBlameValueNode);
 
       if (!oldValueNode || !newValueNode) return null;
 
