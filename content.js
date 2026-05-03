@@ -286,57 +286,38 @@
   };
 
   /**
-   * document 内の既存コメント popup すべてに画面端はみ出し補正を適用する。
-   *
-   * @param {Document} root - 検索対象の document。
-   * @returns {void}
-   */
-  const clampAll = (root) => {
-    root.querySelectorAll(".docos-anchoreddocoview").forEach((el) => {
-      addCommentResizeHandle(el);
-      clampPosition(el);
-    });
-  };
-
-  const positionObserver = new MutationObserver((mutations) => {
-    for (const mutation of mutations) {
-      // style 属性の変化（Google SpreadsheetがleftをinlineStyleで設定する）
-      if (
-        mutation.type === "attributes" &&
-        mutation.attributeName === "style"
-      ) {
-        const el = mutation.target;
-        if (el.classList.contains("docos-anchoreddocoview")) {
-          addCommentResizeHandle(el);
-          clampPosition(el);
-        }
-      }
-      // 新しく追加されたコメントウィンドウ
-      for (const node of mutation.addedNodes) {
-        if (node.nodeType !== Node.ELEMENT_NODE) continue;
-        if (node.classList?.contains("docos-anchoreddocoview")) {
-          addCommentResizeHandle(node);
-          clampPosition(node);
-        }
-        node.querySelectorAll?.(".docos-anchoreddocoview").forEach((el) => {
-          addCommentResizeHandle(el);
-          clampPosition(el);
-        });
-      }
-    }
-  });
-
-  /**
-   * document 内のコメント popup 追加と inline style 変更を監視し、位置を補正する。
+   * document 内の popup 追加と inline style 変更を監視し、同期処理を適用する。
    *
    * @param {Document} doc - 監視対象 document。
+   * @param {string} selector - popup を特定する CSS selector。
+   * @param {(el: HTMLElement) => void} syncPopup - popup に適用する処理。
    * @returns {void}
    */
-  const observePositionInDoc = (doc) => {
+  const observePopupInDoc = (doc, selector, syncPopup) => {
     try {
       if (!doc) return;
-      clampAll(doc);
-      positionObserver.observe(doc.body || doc.documentElement, {
+      doc.querySelectorAll(selector).forEach(syncPopup);
+
+      const observer = new MutationObserver((mutations) => {
+        for (const mutation of mutations) {
+          // style 属性の変化（Google SpreadsheetがleftをinlineStyleで設定する）
+          if (
+            mutation.type === "attributes" &&
+            mutation.attributeName === "style"
+          ) {
+            const el = mutation.target;
+            if (el.matches?.(selector)) syncPopup(el);
+          }
+
+          for (const node of mutation.addedNodes) {
+            if (node.nodeType !== Node.ELEMENT_NODE) continue;
+            if (node.matches?.(selector)) syncPopup(node);
+            node.querySelectorAll?.(selector).forEach(syncPopup);
+          }
+        }
+      });
+
+      observer.observe(doc.body || doc.documentElement, {
         childList: true,
         subtree: true,
         attributes: true,
@@ -345,6 +326,27 @@
     } catch {
       // cross-origin iframe はスキップ
     }
+  };
+
+  /**
+   * コメント popup の表示状態を同期する。
+   *
+   * @param {HTMLElement} el - `.docos-anchoreddocoview` 要素。
+   * @returns {void}
+   */
+  const syncCommentPopup = (el) => {
+    addCommentResizeHandle(el);
+    clampPosition(el);
+  };
+
+  /**
+   * document 内のコメント popup 追加と inline style 変更を監視し、位置を補正する。
+   *
+   * @param {Document} doc - 監視対象 document。
+   * @returns {void}
+   */
+  const observePositionInDoc = (doc) => {
+    observePopupInDoc(doc, ".docos-anchoreddocoview", syncCommentPopup);
   };
 
   observePositionInDoc(document);
@@ -969,7 +971,6 @@
 
   const BLAME_HANDLE_CLASS = "widen-ext-blame-handle";
   const BLAME_DEFAULT_WIDTH = 320;
-  const observedBlamePopups = new WeakSet();
 
   const blameHandleCSS = `
     .waffle-blameview {
@@ -1079,32 +1080,12 @@
         onResize: clampPopupBounds,
       });
     }
-    observeBlamePopupState(el);
 
-    if (isBlamePopupVisible(el)) clampPopupBounds(el);
-  };
-
-  /**
-   * 編集履歴 popup 自身の表示状態だけを監視し、閉じたら次回用のデフォルト幅へ戻す。
-   *
-   * @param {HTMLElement} el - `.waffle-blameview` 要素。
-   * @returns {void}
-   */
-  const observeBlamePopupState = (el) => {
-    if (observedBlamePopups.has(el)) return;
-    observedBlamePopups.add(el);
-
-    const observer = new MutationObserver(() => {
-      if (isBlamePopupVisible(el)) {
-        clampPopupBounds(el);
-      } else {
-        resetBlamePopupState(el);
-      }
-    });
-    observer.observe(el, {
-      attributes: true,
-      attributeFilter: ["style"],
-    });
+    if (isBlamePopupVisible(el)) {
+      clampPopupBounds(el);
+    } else {
+      resetBlamePopupState(el);
+    }
   };
 
   /**
@@ -1114,32 +1095,7 @@
    * @returns {void}
    */
   const observeBlameView = (root) => {
-    // 既存の要素に適用
-    root.querySelectorAll(".waffle-blameview").forEach(addBlameResizeHandle);
-
-    // 動的に追加された要素を監視
-    const obs = new MutationObserver((mutations) => {
-      for (const mutation of mutations) {
-        for (const node of mutation.addedNodes) {
-          if (node.nodeType !== Node.ELEMENT_NODE) continue;
-          if (node.classList?.contains("waffle-blameview")) {
-            addBlameResizeHandle(node);
-          }
-          node
-            .querySelectorAll?.(".waffle-blameview")
-            .forEach(addBlameResizeHandle);
-        }
-      }
-    });
-
-    try {
-      obs.observe(root.body || root.documentElement, {
-        childList: true,
-        subtree: true,
-      });
-    } catch {
-      // cross-origin などは無視
-    }
+    observePopupInDoc(root, ".waffle-blameview", addBlameResizeHandle);
   };
 
   observeBlameView(document);
