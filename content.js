@@ -142,15 +142,16 @@
   const RIGHT_SIDEBAR_OFFSET = 56; // 右端メニューバー（56px）分
 
   /**
-   * コメント popup が画面右端からはみ出す場合、left を左へ補正する。
+   * popup が画面右端からはみ出す場合、left を左へ補正する。
    *
-   * @param {HTMLElement} el - `.docos-anchoreddocoview` 要素。
+   * @param {HTMLElement} el - 補正対象 popup。
    * @returns {void}
    */
-  const clampPosition = (el) => {
+  const clampRightPosition = (el) => {
+    const view = el.ownerDocument.defaultView ?? window;
     const rect = el.getBoundingClientRect();
     const overflowRight =
-      rect.right - window.innerWidth + MARGIN + RIGHT_SIDEBAR_OFFSET;
+      rect.right - view.innerWidth + MARGIN + RIGHT_SIDEBAR_OFFSET;
     if (overflowRight > 0) {
       const currentLeft = parseFloat(el.style.left) || 0;
       el.style.setProperty(
@@ -160,6 +161,14 @@
       );
     }
   };
+
+  /**
+   * コメント popup が画面右端からはみ出す場合、left を左へ補正する。
+   *
+   * @param {HTMLElement} el - `.docos-anchoreddocoview` 要素。
+   * @returns {void}
+   */
+  const clampPosition = clampRightPosition;
 
   const renderResizeHandleIcon = () => `
     <svg width="14" height="14" viewBox="0 0 14 14" fill="none" xmlns="http://www.w3.org/2000/svg" style="transform:rotate(90deg)">
@@ -1018,6 +1027,7 @@
       handleClass: BLAME_HANDLE_CLASS,
       minWidth: 200,
       minHeight: 120,
+      onResize: clampRightPosition,
     });
   };
 
