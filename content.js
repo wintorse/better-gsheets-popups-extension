@@ -206,12 +206,20 @@
    * @param {number} options.minWidth - 最小幅 px。
    * @param {number} options.minHeight - 最小高さ px。
    * @param {(el: HTMLElement) => HTMLElement} [options.getHeightTarget] - 高さを変更する要素。省略時は popup 自身。
+   * @param {boolean} [options.syncMaxHeight=false] - 手動 height を max-height にも反映するか。
    * @param {(el: HTMLElement) => void} [options.onResize] - サイズ更新後に実行する処理。
    * @returns {void}
    */
   const addResizeHandle = (
     el,
-    { handleClass, minWidth, minHeight, getHeightTarget, onResize },
+    {
+      handleClass,
+      minWidth,
+      minHeight,
+      getHeightTarget,
+      syncMaxHeight = false,
+      onResize,
+    },
   ) => {
     if (el.querySelector(`.${handleClass}`)) return;
 
@@ -255,7 +263,15 @@
         const newHeight = Math.max(minHeight, startHeight + dy);
 
         el.style.setProperty("width", `${newWidth}px`, "important");
-        heightTarget.style.setProperty("height", `${newHeight}px`, "important");
+        const heightValue = `${newHeight}px`;
+        heightTarget.style.setProperty("height", heightValue, "important");
+        if (syncMaxHeight) {
+          heightTarget.style.setProperty(
+            "max-height",
+            heightValue,
+            "important",
+          );
+        }
         onResize?.(el);
       };
 
@@ -1188,6 +1204,20 @@
   };
 
   /**
+   * 編集履歴 popup の手動リサイズ直後に、左右と下端の境界補正を同期実行する。
+   *
+   * ハンドルを下へドラッグして BOTTOM_EDGE_OFFSET を割る場合は、次の frame を待たず
+   * その場で top を上へ逃がす。これにより、下端余白を保ったまま本文領域を広げられる。
+   *
+   * @param {HTMLElement} el - `.waffle-blameview` 要素。
+   * @returns {void}
+   */
+  const syncBlameResizeBounds = (el) => {
+    clampPopupBounds(el);
+    clampBlameBottomPosition(el);
+  };
+
+  /**
    * 編集履歴 popup にドラッグ可能なリサイズハンドルを追加する。
    *
    * @param {HTMLElement} el - `.waffle-blameview` 要素。
@@ -1203,7 +1233,8 @@
         // 高さ変更は履歴本文だけに限定し、warning / feedback / navigation の高さを保つ。
         getHeightTarget: (popup) =>
           popup.querySelector(".docs-blameview-valuecontainer") ?? popup,
-        onResize: addBlameResizeHandle,
+        syncMaxHeight: true,
+        onResize: syncBlameResizeBounds,
       });
     }
 
