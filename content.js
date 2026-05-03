@@ -149,8 +149,12 @@
    * @returns {void}
    */
   const clampPopupBounds = (el) => {
+    if (!el.isConnected) return;
+
     const view = el.ownerDocument.defaultView ?? window;
     let rect = el.getBoundingClientRect();
+    if (rect.width === 0 && rect.height === 0) return;
+
     const overflowRight =
       rect.right - view.innerWidth + MARGIN + RIGHT_SIDEBAR_OFFSET;
     if (overflowRight > 0) {
@@ -964,6 +968,8 @@
   // ── 編集履歴ポップアップ（.waffle-blameview）リサイズハンドル ──────────────
 
   const BLAME_HANDLE_CLASS = "widen-ext-blame-handle";
+  const BLAME_DEFAULT_WIDTH = 320;
+  const observedBlamePopups = new WeakSet();
 
   const blameHandleCSS = `
     .waffle-blameview {
@@ -1024,21 +1030,80 @@
   injectBlameHandleStyle(document);
 
   /**
+   * 編集履歴 popup を次回表示用の初期状態へ戻す。
+   *
+   * @param {HTMLElement} el - `.waffle-blameview` 要素。
+   * @returns {void}
+   */
+  const resetBlamePopupState = (el) => {
+    const width = `${BLAME_DEFAULT_WIDTH}px`;
+    if (el.style.getPropertyValue("width") !== width) {
+      el.style.setProperty("width", width, "important");
+    }
+    if (el.style.getPropertyValue("height")) {
+      el.style.removeProperty("height");
+    }
+  };
+
+  /**
+   * 編集履歴 popup が画面上に表示されているか判定する。
+   *
+   * @param {HTMLElement} el - `.waffle-blameview` 要素。
+   * @returns {boolean} 表示中なら true。
+   */
+  const isBlamePopupVisible = (el) => {
+    if (!el.isConnected) return false;
+    const rect = el.getBoundingClientRect();
+    const style = el.ownerDocument.defaultView?.getComputedStyle(el);
+    return (
+      rect.width > 0 &&
+      rect.height > 0 &&
+      style?.display !== "none" &&
+      style?.visibility !== "hidden"
+    );
+  };
+
+  /**
    * 編集履歴 popup にドラッグ可能なリサイズハンドルを追加する。
    *
    * @param {HTMLElement} el - `.waffle-blameview` 要素。
    * @returns {void}
    */
   const addBlameResizeHandle = (el) => {
-    if (el.querySelector(`.${BLAME_HANDLE_CLASS}`)) return;
+    if (!el.querySelector(`.${BLAME_HANDLE_CLASS}`)) {
+      resetBlamePopupState(el);
+      addResizeHandle(el, {
+        handleClass: BLAME_HANDLE_CLASS,
+        minWidth: 200,
+        minHeight: 120,
+        onResize: clampPopupBounds,
+      });
+    }
+    observeBlamePopupState(el);
 
-    // 初期高さを設定
-    el.style.setProperty("height", "200px", "important");
-    addResizeHandle(el, {
-      handleClass: BLAME_HANDLE_CLASS,
-      minWidth: 200,
-      minHeight: 120,
-      onResize: clampPopupBounds,
+    if (isBlamePopupVisible(el)) clampPopupBounds(el);
+  };
+
+  /**
+   * 編集履歴 popup 自身の表示状態だけを監視し、閉じたら次回用のデフォルト幅へ戻す。
+   *
+   * @param {HTMLElement} el - `.waffle-blameview` 要素。
+   * @returns {void}
+   */
+  const observeBlamePopupState = (el) => {
+    if (observedBlamePopups.has(el)) return;
+    observedBlamePopups.add(el);
+
+    const observer = new MutationObserver(() => {
+      if (isBlamePopupVisible(el)) {
+        clampPopupBounds(el);
+      } else {
+        resetBlamePopupState(el);
+      }
+    });
+    observer.observe(el, {
+      attributes: true,
+      attributeFilter: ["style"],
     });
   };
 
