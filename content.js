@@ -483,6 +483,25 @@
     const childNodes = Array.from(valueContent.childNodes);
     // 引用符を除去する
     const strip = (s) => s.trim().replace(/^["「]|["」]$/g, "");
+    const isValueNode = (node) => {
+      if (node.nodeType === Node.TEXT_NODE) {
+        return strip(node.textContent).length > 0;
+      }
+      return (
+        node.nodeType === Node.ELEMENT_NODE &&
+        node.classList?.contains("waffle-blameview-formula-text") &&
+        node.textContent.trim()
+      );
+    };
+    const valueText = (node) => {
+      if (
+        node.nodeType === Node.ELEMENT_NODE &&
+        node.classList?.contains("waffle-blameview-formula-text")
+      ) {
+        return (node.textContent ?? "").trim();
+      }
+      return strip(node.textContent ?? "");
+    };
 
     // 「からX」パターン: boldSpan(置き換えました:) + textNode(旧) + boldSpan(から) + textNode(新)
     const boldSpans = childNodes.filter(
@@ -491,24 +510,24 @@
         n.classList?.contains("docs-blame-bold-text"),
     );
 
-    // ── パターンA: span(置き換えました:) + textNode(旧) + span(から) + textNode(新) ──
+    // ── パターンA: span(置き換えました:) + 値 + span(から) + 値 ──
     // 「から」を含むspanを探してパターン確認
     const fromSpan = boldSpans.find((s) => s.textContent?.trim() === "から");
     if (fromSpan) {
       const fromSpanIdx = childNodes.indexOf(fromSpan);
-      // 「から」の直前のテキストノードが旧テキスト、直後が新テキスト
-      const oldTextNode = childNodes
+      // 「から」の直前の値が旧テキスト、直後の値が新テキスト
+      const oldValueNode = childNodes
         .slice(0, fromSpanIdx)
         .reverse()
-        .find((n) => n.nodeType === Node.TEXT_NODE && n.textContent.trim());
-      const newTextNode = childNodes
+        .find(isValueNode);
+      const newValueNode = childNodes
         .slice(fromSpanIdx + 1)
-        .find((n) => n.nodeType === Node.TEXT_NODE && n.textContent.trim());
+        .find(isValueNode);
 
-      if (!oldTextNode || !newTextNode) return;
+      if (!oldValueNode || !newValueNode) return;
 
-      const oldText = strip(oldTextNode.textContent);
-      const newText = strip(newTextNode.textContent);
+      const oldText = valueText(oldValueNode);
+      const newText = valueText(newValueNode);
 
       // マーク済みにしてから再描画
       valueContent.setAttribute(BLAME_DIFF_ATTR, "1");
@@ -537,13 +556,13 @@
     if (boldSpans.length === 1) {
       const actionSpan = boldSpans[0];
       const actionText = actionSpan.textContent ?? "";
-      const textNode = childNodes
+      const contentNode = childNodes
         .slice(childNodes.indexOf(actionSpan) + 1)
-        .find((n) => n.nodeType === Node.TEXT_NODE && n.textContent.trim());
+        .find(isValueNode);
 
-      if (!textNode) return;
+      if (!contentNode) return;
 
-      const content = strip(textNode.textContent);
+      const content = valueText(contentNode);
       // マーク済みにしてから再描画
       valueContent.setAttribute(BLAME_DIFF_ATTR, "1");
 
