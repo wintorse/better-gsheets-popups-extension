@@ -141,9 +141,14 @@
   const LEFT_EDGE_OFFSET = 16; // 左端に残す px
   const MARGIN = 16; // マージンとスクロールバー分を考慮した px
   const RIGHT_SIDEBAR_OFFSET = 56; // 右端メニューバー（56px）分
+  const BOTTOM_EDGE_OFFSET = 48; // 下端に残す px
 
   /**
    * popup が画面端からはみ出す場合、left と width を補正する。
+   *
+   * 右端には Sheets のサイドバー分の余白を残す。右端に到達した後もドラッグで幅を
+   * 広げられるよう、まず left を左へ逃がす。左端の余白を割る場合は、それ以上
+   * 左へ逃がさず width を縮めて最大幅として扱う。
    *
    * @param {HTMLElement} el - 補正対象 popup。
    * @returns {void}
@@ -200,12 +205,13 @@
    * @param {string} options.handleClass - ハンドル要素に付ける class。
    * @param {number} options.minWidth - 最小幅 px。
    * @param {number} options.minHeight - 最小高さ px。
+   * @param {(el: HTMLElement) => HTMLElement} [options.getHeightTarget] - 高さを変更する要素。省略時は popup 自身。
    * @param {(el: HTMLElement) => void} [options.onResize] - サイズ更新後に実行する処理。
    * @returns {void}
    */
   const addResizeHandle = (
     el,
-    { handleClass, minWidth, minHeight, onResize },
+    { handleClass, minWidth, minHeight, getHeightTarget, onResize },
   ) => {
     if (el.querySelector(`.${handleClass}`)) return;
 
@@ -231,7 +237,9 @@
       const startX = e.clientX;
       const startY = e.clientY;
       const startWidth = el.offsetWidth;
-      const startHeight = el.offsetHeight;
+      // 編集履歴 popup は footer や feedback を含むため、高さだけ本文領域に逃がせるようにする。
+      const heightTarget = getHeightTarget?.(el) ?? el;
+      const startHeight = heightTarget.offsetHeight;
 
       /**
        * pointerdown 開始位置からの差分で popup サイズを更新する。
@@ -247,7 +255,7 @@
         const newHeight = Math.max(minHeight, startHeight + dy);
 
         el.style.setProperty("width", `${newWidth}px`, "important");
-        el.style.setProperty("height", `${newHeight}px`, "important");
+        heightTarget.style.setProperty("height", `${newHeight}px`, "important");
         onResize?.(el);
       };
 
@@ -288,6 +296,10 @@
   /**
    * document 内の popup 追加と inline style 変更を監視し、同期処理を適用する。
    *
+   * Google Sheets はスクロールやセル移動のたびに popup の left/top を inline style で
+   * 書き換える。コメントと編集履歴で同じ追従処理が必要なので、selector と同期関数だけを
+   * 差し替えられる共通 observer にしている。
+   *
    * @param {Document} doc - 監視対象 document。
    * @param {string} selector - popup を特定する CSS selector。
    * @param {(el: HTMLElement) => void} syncPopup - popup に適用する処理。
@@ -312,6 +324,9 @@
           for (const node of mutation.addedNodes) {
             if (node.nodeType !== Node.ELEMENT_NODE) continue;
             if (node.matches?.(selector)) syncPopup(node);
+            // popup の外枠だけ先に作られ、本文 DOM が後から入るケースを拾う。
+            const parentPopup = node.closest?.(selector);
+            if (parentPopup) syncPopup(parentPopup);
             node.querySelectorAll?.(selector).forEach(syncPopup);
           }
         }
@@ -971,21 +986,46 @@
 
   const BLAME_HANDLE_CLASS = "widen-ext-blame-handle";
   const BLAME_DEFAULT_WIDTH = 320;
+  const BLAME_VALUE_MAX_HEIGHT = 240;
+  const BLAME_VALUE_MIN_HEIGHT = 120;
+  const scheduledBlameBottomClamps = new WeakSet();
 
   const blameHandleCSS = `
     .waffle-blameview {
       overflow: hidden !important;
       box-sizing: border-box !important;
     }
+    .waffle-blameview .docs-blameview {
+      /*
+       * Google Sheets 標準の .docs-blameview は width: 240px を持つ。
+       * 外側 popup を広げても中身だけ固定幅になるため、内側も親幅へ追従させる。
+       */
+      width: 100% !important;
+      max-width: none !important;
+    }
+    .waffle-blameview .docs-blameview-content,
+    .waffle-blameview .docs-blameview-valuecontainer,
+    .waffle-blameview .docs-blameview-value-content {
+      /*
+       * 値表示まわりにも固定幅や shrink しやすい計算が残ることがある。
+       * diff block を含む本文を、広げた popup の横幅いっぱいに使わせる。
+       */
+      width: 100% !important;
+      max-width: none !important;
+      min-width: 0 !important;
+    }
     .waffle-blameview > *:not(.${BLAME_HANDLE_CLASS}),
     .waffle-blameview * {
-      max-height: none !important;
       box-sizing: border-box !important;
     }
-    .waffle-blameview > *:not(.${BLAME_HANDLE_CLASS}) {
+    .waffle-blameview .docs-blameview-valuecontainer {
+      /*
+       * 編集履歴本文だけをスクロール領域にする。popup 全体に max-height を付けると
+       * warning や feedback の高さまで圧縮対象になり、Google Sheets 標準 UI が崩れる。
+       */
       min-height: 0 !important;
+      max-height: ${BLAME_VALUE_MAX_HEIGHT}px !important;
       overflow: auto !important;
-      width: 100% !important;
     }
     .${BLAME_HANDLE_CLASS} {
       position: absolute;
@@ -1033,6 +1073,10 @@
   /**
    * 編集履歴 popup を次回表示用の初期状態へ戻す。
    *
+   * `.waffle-blameview` は閉じても DOM に残るため、ドラッグで付けた inline style も
+   * 次回表示に持ち越される。幅はユーザ設定のデフォルトへ戻し、高さは Sheets 側の
+   * 自然な計算に戻すため inline height を削除する。
+   *
    * @param {HTMLElement} el - `.waffle-blameview` 要素。
    * @returns {void}
    */
@@ -1041,13 +1085,28 @@
     if (el.style.getPropertyValue("width") !== width) {
       el.style.setProperty("width", width, "important");
     }
+    const blameView = el.querySelector(".docs-blameview");
+    if (blameView?.style.getPropertyValue("width") !== "100%") {
+      blameView?.style.setProperty("width", "100%", "important");
+    }
     if (el.style.getPropertyValue("height")) {
       el.style.removeProperty("height");
+    }
+    // 高さのドラッグ対象は本文領域だけ。閉じたら本文の inline height も消す。
+    const valueContainer = el.querySelector(".docs-blameview-valuecontainer");
+    if (valueContainer?.style.getPropertyValue("height")) {
+      valueContainer.style.removeProperty("height");
+    }
+    if (valueContainer?.style.getPropertyValue("max-height")) {
+      valueContainer.style.removeProperty("max-height");
     }
   };
 
   /**
    * 編集履歴 popup が画面上に表示されているか判定する。
+   *
+   * 閉じた popup は DOM に残るため、isConnected だけでは表示状態を判定できない。
+   * 非表示中は次回表示用の初期化、表示中は境界補正を行うために使う。
    *
    * @param {HTMLElement} el - `.waffle-blameview` 要素。
    * @returns {boolean} 表示中なら true。
@@ -1065,6 +1124,70 @@
   };
 
   /**
+   * 編集履歴 popup が画面下端からはみ出す場合、Sheets が決めた top を最小限だけ上へ補正する。
+   *
+   * 通常の配置は Sheets に任せる。下端に届いた場合だけ、本文をさらに小さくする代わりに
+   * popup 全体を上へ逃がして BOTTOM_EDGE_OFFSET を確保する。
+   *
+   * @param {HTMLElement} el - `.waffle-blameview` 要素。
+   * @returns {void}
+   */
+  const clampBlameBottomPosition = (el) => {
+    const view = el.ownerDocument.defaultView ?? window;
+    const rect = el.getBoundingClientRect();
+    if (rect.width === 0 && rect.height === 0) return;
+
+    const overflowBottom = rect.bottom - view.innerHeight + BOTTOM_EDGE_OFFSET;
+    if (overflowBottom <= 0) return;
+
+    const currentTop = Number.isNaN(parseFloat(el.style.top))
+      ? rect.top
+      : parseFloat(el.style.top);
+    const nextTop = Math.max(MARGIN, currentTop - overflowBottom);
+    el.style.setProperty("top", `${nextTop}px`, "important");
+  };
+
+  /**
+   * 編集履歴本文の描画完了を待ちながら、数 frame だけ下端補正を再試行する。
+   *
+   * Sheets は popup 外枠と位置を先に更新し、その後に valuecontainer の内容を描画する
+   * ことがある。同期直後の 1 回だけでは高さ計算が早すぎるため、短い rAF チェーンで
+   * 後続描画を拾う。
+   *
+   * @param {HTMLElement} el - `.waffle-blameview` 要素。
+   * @returns {void}
+   */
+  const scheduleBlameBottomClamp = (el) => {
+    if (scheduledBlameBottomClamps.has(el)) return;
+    scheduledBlameBottomClamps.add(el);
+
+    const view = el.ownerDocument.defaultView;
+    if (!view) {
+      scheduledBlameBottomClamps.delete(el);
+      return;
+    }
+
+    let remaining = 4;
+    const tick = () => {
+      if (!el.isConnected || !isBlamePopupVisible(el)) {
+        scheduledBlameBottomClamps.delete(el);
+        return;
+      }
+
+      clampPopupBounds(el);
+      clampBlameBottomPosition(el);
+      remaining -= 1;
+      if (remaining > 0) {
+        view.requestAnimationFrame(tick);
+      } else {
+        scheduledBlameBottomClamps.delete(el);
+      }
+    };
+
+    view.requestAnimationFrame(tick);
+  };
+
+  /**
    * 編集履歴 popup にドラッグ可能なリサイズハンドルを追加する。
    *
    * @param {HTMLElement} el - `.waffle-blameview` 要素。
@@ -1076,13 +1199,18 @@
       addResizeHandle(el, {
         handleClass: BLAME_HANDLE_CLASS,
         minWidth: 200,
-        minHeight: 120,
-        onResize: clampPopupBounds,
+        minHeight: BLAME_VALUE_MIN_HEIGHT,
+        // 高さ変更は履歴本文だけに限定し、warning / feedback / navigation の高さを保つ。
+        getHeightTarget: (popup) =>
+          popup.querySelector(".docs-blameview-valuecontainer") ?? popup,
+        onResize: addBlameResizeHandle,
       });
     }
 
     if (isBlamePopupVisible(el)) {
       clampPopupBounds(el);
+      clampBlameBottomPosition(el);
+      scheduleBlameBottomClamp(el);
     } else {
       resetBlamePopupState(el);
     }
