@@ -1,8 +1,96 @@
 (() => {
-  const STYLE_ID = "spreadsheet-wide-comment-style";
-  const COMMENT_HANDLE_CLASS = "widen-ext-comment-handle";
+  "use strict";
 
-  const css = `
+  /**
+   * Google Sheets のコメント popup とセル編集履歴 popup を読みやすくする。
+   *
+   * 主な責務:
+   * - コメント popup の横幅拡張、リサイズ、画面端補正
+   * - 編集履歴 popup のリサイズ、画面端補正
+   * - 編集履歴値の追加・削除・置換を git diff 風に再描画
+   * - Google Sheets 内の同一 origin iframe への同じ処理の適用
+   */
+
+  const STYLE_IDS = {
+    comment: "spreadsheet-wide-comment-style",
+    diff: "widen-ext-blame-diff-style",
+    blameHandle: "widen-ext-blame-handle-style",
+  };
+
+  const SELECTORS = {
+    iframe: "iframe",
+    commentPopup: ".docos-anchoreddocoview",
+    blamePopup: ".waffle-blameview",
+    blameView: ".docs-blameview",
+    blameValueContainer: ".docs-blameview-valuecontainer",
+    blameValueContent: ".docs-blameview-value-content",
+    blameBoldText: ".docs-blame-bold-text",
+  };
+
+  const COMMENT_HANDLE_CLASS = "widen-ext-comment-handle";
+  const BLAME_HANDLE_CLASS = "widen-ext-blame-handle";
+  const BLAME_DIFF_ATTR = "data-widen-diff-rendered";
+  const BLAME_DIFF_LAYOUT_ATTR = "data-widen-diff-layout";
+  const BLAME_DIFF_LAYOUT_KEY = "widen-ext-blame-diff-layout";
+  const BLAME_DIFF_TOGGLE_CLASS = "widen-diff-layout-toggle";
+  const BLAME_DIFF_TOGGLE_ROW_CLASS = "widen-diff-layout-toggle-row";
+
+  const POPUP_BOUNDS = {
+    leftEdgeOffset: 16,
+    margin: 16,
+    rightSidebarOffset: 56,
+    bottomEdgeOffset: 48,
+  };
+
+  const COMMENT_MIN_WIDTH = 240;
+  const COMMENT_MIN_HEIGHT = 160;
+  const BLAME_DEFAULT_WIDTH = 320;
+  const BLAME_MIN_WIDTH = 200;
+  const BLAME_VALUE_MAX_HEIGHT = 240;
+  const BLAME_VALUE_MIN_HEIGHT = 120;
+
+  const initializedDocuments = new WeakSet();
+  const observedFrameDocuments = new WeakSet();
+  const observedFrames = new WeakSet();
+  const observedPopupSelectors = new WeakMap();
+  const observedDiffDocuments = new WeakSet();
+  const observedDiffToggleDocuments = new WeakSet();
+  const scheduledBlameBottomClamps = new WeakSet();
+
+  /**
+   * リサイズハンドル用の共通 CSS を生成する。
+   *
+   * @param {string} handleClass - ハンドル要素の class。
+   * @returns {string} CSS 文字列。
+   */
+  const createResizeHandleCSS = (handleClass) => `
+    .${handleClass} {
+      position: absolute;
+      bottom: 0;
+      right: 0;
+      width: 18px;
+      height: 18px;
+      cursor: se-resize;
+      z-index: 99999;
+      box-sizing: border-box;
+      background: transparent;
+      display: flex;
+      align-items: flex-end;
+      justify-content: flex-end;
+      padding: 2px;
+      flex: none !important;
+    }
+    .${handleClass} svg {
+      pointer-events: none;
+      opacity: 0.45;
+      transition: opacity 0.15s;
+    }
+    .${handleClass}:hover svg {
+      opacity: 0.85;
+    }
+  `;
+
+  const commentCSS = `
     .docos-anchoreddocoview {
       min-width: 300px !important;
       max-width: none !important;
@@ -29,400 +117,10 @@
       word-wrap: break-word !important;
       white-space: pre-wrap !important;
     }
-    .${COMMENT_HANDLE_CLASS} {
-      position: absolute;
-      bottom: 0;
-      right: 0;
-      width: 18px;
-      height: 18px;
-      cursor: se-resize;
-      z-index: 99999;
-      box-sizing: border-box;
-      background: transparent;
-      display: flex;
-      align-items: flex-end;
-      justify-content: flex-end;
-      padding: 2px;
-      flex: none !important;
-    }
-    .${COMMENT_HANDLE_CLASS} svg {
-      pointer-events: none;
-      opacity: 0.45;
-      transition: opacity 0.15s;
-    }
-    .${COMMENT_HANDLE_CLASS}:hover svg {
-      opacity: 0.85;
-    }
+    ${createResizeHandleCSS(COMMENT_HANDLE_CLASS)}
   `;
 
-  /**
-   * コメント popup の幅調整 CSS を指定 document に一度だけ注入する。
-   *
-   * @param {Document} doc - CSS を注入する document。Google Sheets 内 iframe の document も含む。
-   * @returns {void}
-   */
-  const injectStyle = (doc) => {
-    if (!doc || doc.getElementById(STYLE_ID)) return;
-    const style = doc.createElement("style");
-    style.id = STYLE_ID;
-    style.textContent = css;
-    (doc.head || doc.documentElement).appendChild(style);
-  };
-
-  // メインドキュメントに注入
-  injectStyle(document);
-
-  // iframe にも注入するため MutationObserver で監視
-  /**
-   * root 配下に存在する iframe と、後から追加される iframe へコメント用 CSS を注入する。
-   *
-   * @param {Document} root - 監視対象の document。
-   * @returns {void}
-   */
-  const observeIframes = (root) => {
-    /**
-     * iframe の load 後に同一 origin の document へ CSS を注入する。
-     *
-     * @param {HTMLIFrameElement} iframe - 注入対象 iframe。
-     * @returns {void}
-     */
-    const injectToIframe = (iframe) => {
-      /**
-       * iframe の contentDocument が読める場合だけ CSS と nested iframe 監視を設定する。
-       *
-       * @returns {void}
-       */
-      const tryInject = () => {
-        try {
-          const iframeDoc = iframe.contentDocument;
-          if (iframeDoc) {
-            injectStyle(iframeDoc);
-            // iframe 内の更なる iframe も監視
-            observeIframes(iframeDoc);
-          }
-        } catch {
-          // cross-origin iframe はスキップ
-        }
-      };
-
-      if (
-        iframe.contentDocument &&
-        iframe.contentDocument.readyState === "complete"
-      ) {
-        tryInject();
-      } else {
-        iframe.addEventListener("load", tryInject);
-      }
-    };
-
-    // 既存の iframe に注入
-    root.querySelectorAll("iframe").forEach(injectToIframe);
-
-    // 新たに追加される iframe を監視
-    const observer = new MutationObserver((mutations) => {
-      for (const mutation of mutations) {
-        for (const node of mutation.addedNodes) {
-          if (node.nodeType !== Node.ELEMENT_NODE) continue;
-          if (node.tagName === "IFRAME") {
-            injectToIframe(node);
-          }
-          node.querySelectorAll?.("iframe").forEach(injectToIframe);
-        }
-      }
-    });
-
-    observer.observe(root, { childList: true, subtree: true });
-  };
-
-  observeIframes(document);
-
-  // popup が画面端を超えないよう位置と幅を補正する
-  const LEFT_EDGE_OFFSET = 16; // 左端に残す px
-  const MARGIN = 16; // マージンとスクロールバー分を考慮した px
-  const RIGHT_SIDEBAR_OFFSET = 56; // 右端メニューバー（56px）分
-  const BOTTOM_EDGE_OFFSET = 48; // 下端に残す px
-
-  /**
-   * popup が画面端からはみ出す場合、left と width を補正する。
-   *
-   * 右端には Sheets のサイドバー分の余白を残す。右端に到達した後もドラッグで幅を
-   * 広げられるよう、まず left を左へ逃がす。左端の余白を割る場合は、それ以上
-   * 左へ逃がさず width を縮めて最大幅として扱う。
-   *
-   * @param {HTMLElement} el - 補正対象 popup。
-   * @returns {void}
-   */
-  const clampPopupBounds = (el) => {
-    if (!el.isConnected) return;
-
-    const view = el.ownerDocument.defaultView ?? window;
-    let rect = el.getBoundingClientRect();
-    if (rect.width === 0 && rect.height === 0) return;
-
-    const overflowRight =
-      rect.right - view.innerWidth + MARGIN + RIGHT_SIDEBAR_OFFSET;
-    if (overflowRight > 0) {
-      const currentLeft = parseFloat(el.style.left) || 0;
-      el.style.setProperty(
-        "left",
-        `${currentLeft - overflowRight}px`,
-        "important",
-      );
-    }
-
-    rect = el.getBoundingClientRect();
-    const overflowLeft = LEFT_EDGE_OFFSET - rect.left;
-    if (overflowLeft > 0) {
-      const currentLeft = parseFloat(el.style.left) || 0;
-      const nextLeft = currentLeft + overflowLeft;
-      const maxWidth = Math.max(0, rect.right - LEFT_EDGE_OFFSET);
-      el.style.setProperty("left", `${nextLeft}px`, "important");
-      el.style.setProperty("width", `${maxWidth}px`, "important");
-    }
-  };
-
-  /**
-   * コメント popup が画面端からはみ出す場合、left と width を補正する。
-   *
-   * @param {HTMLElement} el - `.docos-anchoreddocoview` 要素。
-   * @returns {void}
-   */
-  const clampPosition = clampPopupBounds;
-
-  const renderResizeHandleIcon = () => `
-    <svg width="14" height="14" viewBox="0 0 14 14" fill="none" xmlns="http://www.w3.org/2000/svg" style="transform:rotate(90deg)">
-      <line x1="13" y1="13" x2="1"  y2="1"  stroke="#555" stroke-width="1.5" stroke-linecap="round"/>
-      <line x1="13" y1="9"  x2="5"  y2="1"  stroke="#555" stroke-width="1.5" stroke-linecap="round"/>
-      <line x1="13" y1="5"  x2="9"  y2="1"  stroke="#555" stroke-width="1.5" stroke-linecap="round"/>
-    </svg>`;
-
-  /**
-   * popup にドラッグ可能なリサイズハンドルを追加する。
-   *
-   * @param {HTMLElement} el - リサイズ対象 popup。
-   * @param {object} options - ハンドル設定。
-   * @param {string} options.handleClass - ハンドル要素に付ける class。
-   * @param {number} options.minWidth - 最小幅 px。
-   * @param {number} options.minHeight - 最小高さ px。
-   * @param {boolean} [options.resizeHeight=true] - 高さも変更するか。
-   * @param {(el: HTMLElement) => HTMLElement} [options.getHeightTarget] - 高さを変更する要素。省略時は popup 自身。
-   * @param {boolean} [options.syncMaxHeight=false] - 手動 height を max-height にも反映するか。
-   * @param {(el: HTMLElement) => void} [options.onResize] - サイズ更新後に実行する処理。
-   * @returns {void}
-   */
-  const addResizeHandle = (
-    el,
-    {
-      handleClass,
-      minWidth,
-      minHeight,
-      resizeHeight = true,
-      getHeightTarget,
-      syncMaxHeight = false,
-      onResize,
-    },
-  ) => {
-    if (el.querySelector(`.${handleClass}`)) return;
-
-    // position が static なら relative に昇格してハンドルを正しく配置する
-    const computed = el.ownerDocument.defaultView?.getComputedStyle(el);
-    if (computed?.position === "static") {
-      el.style.position = "relative";
-    }
-
-    const handle = el.ownerDocument.createElement("div");
-    handle.className = handleClass;
-    handle.innerHTML = renderResizeHandleIcon();
-    el.appendChild(handle);
-
-    handle.addEventListener("pointerdown", (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-
-      // Pointer Capture でハンドル自身にポインターイベントを束縛する
-      // → Google Sheets が stopPropagation しても確実に pointermove/pointerup を受け取れる
-      handle.setPointerCapture(e.pointerId);
-
-      const startX = e.clientX;
-      const startY = e.clientY;
-      const startWidth = el.offsetWidth;
-      // 編集履歴 popup は footer や feedback を含むため、高さだけ本文領域に逃がせるようにする。
-      const heightTarget = getHeightTarget?.(el) ?? el;
-      const startHeight = heightTarget.offsetHeight;
-
-      /**
-       * pointerdown 開始位置からの差分で popup サイズを更新する。
-       *
-       * @param {PointerEvent} ev - pointermove イベント。
-       * @returns {void}
-       */
-      const onPointerMove = (ev) => {
-        const dx = ev.clientX - startX;
-        const dy = ev.clientY - startY;
-
-        const newWidth = Math.max(minWidth, startWidth + dx);
-
-        el.style.setProperty("width", `${newWidth}px`, "important");
-        if (resizeHeight) {
-          const newHeight = Math.max(minHeight, startHeight + dy);
-          const heightValue = `${newHeight}px`;
-          heightTarget.style.setProperty("height", heightValue, "important");
-          if (syncMaxHeight) {
-            heightTarget.style.setProperty(
-              "max-height",
-              heightValue,
-              "important",
-            );
-          }
-        }
-        onResize?.(el);
-      };
-
-      /**
-       * pointer capture を解放し、ドラッグ中だけ登録した listener を解除する。
-       *
-       * @param {PointerEvent} ev - pointerup または pointercancel イベント。
-       * @returns {void}
-       */
-      const onPointerUp = (ev) => {
-        handle.releasePointerCapture(ev.pointerId);
-        handle.removeEventListener("pointermove", onPointerMove);
-        handle.removeEventListener("pointerup", onPointerUp);
-        handle.removeEventListener("pointercancel", onPointerUp);
-      };
-
-      handle.addEventListener("pointermove", onPointerMove);
-      handle.addEventListener("pointerup", onPointerUp);
-      handle.addEventListener("pointercancel", onPointerUp);
-    });
-  };
-
-  /**
-   * コメント popup にドラッグ可能なリサイズハンドルを追加する。
-   *
-   * @param {HTMLElement} el - `.docos-anchoreddocoview` 要素。
-   * @returns {void}
-   */
-  const addCommentResizeHandle = (el) => {
-    addResizeHandle(el, {
-      handleClass: COMMENT_HANDLE_CLASS,
-      minWidth: 240,
-      minHeight: 160,
-      resizeHeight: false,
-      onResize: clampPosition,
-    });
-  };
-
-  /**
-   * document 内の popup 追加と inline style 変更を監視し、同期処理を適用する。
-   *
-   * Google Sheets はスクロールやセル移動のたびに popup の left/top を inline style で
-   * 書き換える。コメントと編集履歴で同じ追従処理が必要なので、selector と同期関数だけを
-   * 差し替えられる共通 observer にしている。
-   *
-   * @param {Document} doc - 監視対象 document。
-   * @param {string} selector - popup を特定する CSS selector。
-   * @param {(el: HTMLElement) => void} syncPopup - popup に適用する処理。
-   * @returns {void}
-   */
-  const observePopupInDoc = (doc, selector, syncPopup) => {
-    try {
-      if (!doc) return;
-      doc.querySelectorAll(selector).forEach(syncPopup);
-
-      const observer = new MutationObserver((mutations) => {
-        for (const mutation of mutations) {
-          // style 属性の変化（Google SpreadsheetがleftをinlineStyleで設定する）
-          if (
-            mutation.type === "attributes" &&
-            mutation.attributeName === "style"
-          ) {
-            const el = mutation.target;
-            if (el.matches?.(selector)) syncPopup(el);
-          }
-
-          for (const node of mutation.addedNodes) {
-            if (node.nodeType !== Node.ELEMENT_NODE) continue;
-            if (node.matches?.(selector)) syncPopup(node);
-            // popup の外枠だけ先に作られ、本文 DOM が後から入るケースを拾う。
-            const parentPopup = node.closest?.(selector);
-            if (parentPopup) syncPopup(parentPopup);
-            node.querySelectorAll?.(selector).forEach(syncPopup);
-          }
-        }
-      });
-
-      observer.observe(doc.body || doc.documentElement, {
-        childList: true,
-        subtree: true,
-        attributes: true,
-        attributeFilter: ["style"],
-      });
-    } catch {
-      // cross-origin iframe はスキップ
-    }
-  };
-
-  /**
-   * コメント popup の表示状態を同期する。
-   *
-   * @param {HTMLElement} el - `.docos-anchoreddocoview` 要素。
-   * @returns {void}
-   */
-  const syncCommentPopup = (el) => {
-    addCommentResizeHandle(el);
-    clampPosition(el);
-  };
-
-  /**
-   * document 内のコメント popup 追加と inline style 変更を監視し、位置を補正する。
-   *
-   * @param {Document} doc - 監視対象 document。
-   * @returns {void}
-   */
-  const observePositionInDoc = (doc) => {
-    observePopupInDoc(doc, ".docos-anchoreddocoview", syncCommentPopup);
-  };
-
-  observePositionInDoc(document);
-
-  // iframe 内のコメントウィンドウにも適用
-  /**
-   * root 配下の iframe 内 document にもコメント popup 位置監視を設定する。
-   *
-   * @param {Document} root - iframe を検索する document。
-   * @returns {void}
-   */
-  const observePositionInIframes = (root) => {
-    root.querySelectorAll("iframe").forEach((iframe) => {
-      /**
-       * iframe の contentDocument が読める場合だけ位置監視を設定する。
-       *
-       * @returns {void}
-       */
-      const tryObserve = () => {
-        try {
-          observePositionInDoc(iframe.contentDocument);
-        } catch {}
-      };
-      if (iframe.contentDocument?.readyState === "complete") {
-        tryObserve();
-      } else {
-        iframe.addEventListener("load", tryObserve);
-      }
-    });
-  };
-
-  observePositionInIframes(document);
-
-  // ── 編集履歴ポップアップ: 差分をgit-diff風に再描画 ───────────────────────
-
-  const BLAME_DIFF_ATTR = "data-widen-diff-rendered";
-  const BLAME_DIFF_LAYOUT_KEY = "widen-ext-blame-diff-layout";
-  const BLAME_DIFF_TOGGLE_CLASS = "widen-diff-layout-toggle";
-  const BLAME_DIFF_TOGGLE_ROW_CLASS = "widen-diff-layout-toggle-row";
-
-  const blameDiffCSS = `
+  const diffCSS = `
     .widen-diff-block {
       margin-top: 6px;
       font-size: 12px;
@@ -434,11 +132,11 @@
       font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
       border: 1px solid #e1e1e1;
     }
-    :root[data-widen-diff-layout="horizontal"] .widen-diff-replacement {
+    :root[${BLAME_DIFF_LAYOUT_ATTR}="horizontal"] .widen-diff-replacement {
       display: grid;
       grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
     }
-    :root[data-widen-diff-layout="horizontal"] .widen-diff-replacement .widen-diff-row {
+    :root[${BLAME_DIFF_LAYOUT_ATTR}="horizontal"] .widen-diff-replacement .widen-diff-row {
       min-width: 0;
       overflow-wrap: anywhere;
     }
@@ -515,31 +213,386 @@
     }
   `;
 
+  const blameHandleCSS = `
+    .waffle-blameview {
+      overflow: hidden !important;
+      box-sizing: border-box !important;
+    }
+    .waffle-blameview .docs-blameview {
+      width: 100% !important;
+      max-width: none !important;
+    }
+    .waffle-blameview .docs-blameview-content,
+    .waffle-blameview .docs-blameview-valuecontainer,
+    .waffle-blameview .docs-blameview-value-content {
+      width: 100% !important;
+      max-width: none !important;
+      min-width: 0 !important;
+    }
+    .waffle-blameview > *:not(.${BLAME_HANDLE_CLASS}),
+    .waffle-blameview * {
+      box-sizing: border-box !important;
+    }
+    .waffle-blameview .docs-blameview-valuecontainer {
+      min-height: 0 !important;
+      max-height: ${BLAME_VALUE_MAX_HEIGHT}px !important;
+      overflow: auto !important;
+    }
+    ${createResizeHandleCSS(BLAME_HANDLE_CLASS)}
+  `;
+
   /**
-   * 編集履歴 diff とレイアウト切替ボタンの CSS を指定 document に一度だけ注入する。
+   * CSS を document に一度だけ注入する。
    *
-   * @param {Document} doc - CSS を注入する document。
+   * @param {Document} doc - 注入先 document。
+   * @param {string} id - style 要素の id。
+   * @param {string} css - 注入する CSS。
    * @returns {void}
    */
-  const injectBlameDiffStyle = (doc) => {
-    const id = "widen-ext-blame-diff-style";
+  const injectCSS = (doc, id, css) => {
     if (!doc || doc.getElementById(id)) return;
+
     const style = doc.createElement("style");
     style.id = id;
-    style.textContent = blameDiffCSS;
+    style.textContent = css;
     (doc.head || doc.documentElement).appendChild(style);
   };
 
-  injectBlameDiffStyle(document);
+  /**
+   * Element node だけを後続処理へ流すための type guard。
+   *
+   * @param {Node} node - 判定対象 node。
+   * @returns {node is Element} Element node なら true。
+   */
+  const isElementNode = (node) => node.nodeType === Node.ELEMENT_NODE;
+
+  /**
+   * 指定 selector に一致する要素と、その子孫に同じ処理を適用する。
+   *
+   * @param {Element} root - 検索開始要素。
+   * @param {string} selector - 対象 selector。
+   * @param {(element: HTMLElement) => void} callback - 対象ごとの処理。
+   * @returns {void}
+   */
+  const forEachMatchedElement = (root, selector, callback) => {
+    if (root.matches?.(selector)) callback(/** @type {HTMLElement} */ (root));
+    root.querySelectorAll?.(selector).forEach((element) =>
+      callback(/** @type {HTMLElement} */ (element)),
+    );
+  };
+
+  /**
+   * 同一 origin iframe の document を安全に取得する。
+   *
+   * @param {HTMLIFrameElement} iframe - 対象 iframe。
+   * @returns {Document | null} 読み取れる document。cross-origin などで失敗したら null。
+   */
+  const getIframeDocument = (iframe) => {
+    try {
+      return iframe.contentDocument ?? null;
+    } catch {
+      return null;
+    }
+  };
+
+  /**
+   * iframe の document が読めるタイミングで callback を実行する。
+   *
+   * @param {HTMLIFrameElement} iframe - 対象 iframe。
+   * @param {(doc: Document) => void} callback - iframe document に適用する処理。
+   * @returns {void}
+   */
+  const registerIframeSetup = (iframe, callback) => {
+    if (observedFrames.has(iframe)) return;
+    observedFrames.add(iframe);
+
+    const setup = () => {
+      const frameDocument = getIframeDocument(iframe);
+      if (frameDocument) callback(frameDocument);
+    };
+
+    setup();
+    iframe.addEventListener("load", setup);
+  };
+
+  /**
+   * document 配下の既存 iframe と、後から追加される iframe を監視して初期化する。
+   *
+   * @param {Document} doc - 監視対象 document。
+   * @returns {void}
+   */
+  const observeIframes = (doc) => {
+    if (!doc || observedFrameDocuments.has(doc)) return;
+    observedFrameDocuments.add(doc);
+
+    const setupIframe = (iframe) =>
+      registerIframeSetup(
+        /** @type {HTMLIFrameElement} */ (iframe),
+        setupDocument,
+      );
+
+    doc.querySelectorAll(SELECTORS.iframe).forEach(setupIframe);
+
+    const observer = new MutationObserver((mutations) => {
+      for (const mutation of mutations) {
+        for (const node of mutation.addedNodes) {
+          if (!isElementNode(node)) continue;
+          forEachMatchedElement(node, SELECTORS.iframe, setupIframe);
+        }
+      }
+    });
+
+    observer.observe(doc.body || doc.documentElement, {
+      childList: true,
+      subtree: true,
+    });
+  };
+
+  /**
+   * 指定 document と selector の組み合わせが監視済みか判定し、未監視なら記録する。
+   *
+   * @param {Document} doc - 対象 document。
+   * @param {string} selector - 対象 selector。
+   * @returns {boolean} 今回初めて記録した場合は true。
+   */
+  const markPopupObserver = (doc, selector) => {
+    const selectors = observedPopupSelectors.get(doc) ?? new Set();
+    if (selectors.has(selector)) return false;
+    selectors.add(selector);
+    observedPopupSelectors.set(doc, selectors);
+    return true;
+  };
+
+  /**
+   * popup の追加と inline style 変更を監視し、対象ごとの同期処理を適用する。
+   *
+   * @param {Document} doc - 監視対象 document。
+   * @param {string} selector - popup を特定する selector。
+   * @param {(element: HTMLElement) => void} syncPopup - popup 同期処理。
+   * @returns {void}
+   */
+  const observePopupInDoc = (doc, selector, syncPopup) => {
+    if (!doc) return;
+
+    doc.querySelectorAll(selector).forEach((element) =>
+      syncPopup(/** @type {HTMLElement} */ (element)),
+    );
+
+    if (!markPopupObserver(doc, selector)) return;
+
+    const observer = new MutationObserver((mutations) => {
+      for (const mutation of mutations) {
+        if (
+          mutation.type === "attributes" &&
+          mutation.attributeName === "style" &&
+          isElementNode(mutation.target) &&
+          mutation.target.matches(selector)
+        ) {
+          syncPopup(/** @type {HTMLElement} */ (mutation.target));
+        }
+
+        for (const node of mutation.addedNodes) {
+          if (!isElementNode(node)) continue;
+
+          if (node.matches(selector)) {
+            syncPopup(/** @type {HTMLElement} */ (node));
+          }
+
+          const parentPopup = node.closest?.(selector);
+          if (parentPopup) {
+            syncPopup(/** @type {HTMLElement} */ (parentPopup));
+          }
+
+          node.querySelectorAll?.(selector).forEach((element) =>
+            syncPopup(/** @type {HTMLElement} */ (element)),
+          );
+        }
+      }
+    });
+
+    observer.observe(doc.body || doc.documentElement, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ["style"],
+    });
+  };
+
+  /**
+   * popup が画面端からはみ出す場合、left と width を補正する。
+   *
+   * 右端に到達した場合はまず left を左へ逃がす。左端の余白を割る場合だけ width を
+   * 縮め、Sheets の右サイドバーとスクロールバー分の余白を残す。
+   *
+   * @param {HTMLElement} element - 補正対象 popup。
+   * @returns {void}
+   */
+  const clampPopupBounds = (element) => {
+    if (!element.isConnected) return;
+
+    const view = element.ownerDocument.defaultView ?? window;
+    let rect = element.getBoundingClientRect();
+    if (rect.width === 0 && rect.height === 0) return;
+
+    const overflowRight =
+      rect.right -
+      view.innerWidth +
+      POPUP_BOUNDS.margin +
+      POPUP_BOUNDS.rightSidebarOffset;
+
+    if (overflowRight > 0) {
+      const currentLeft = parseFloat(element.style.left) || 0;
+      element.style.setProperty(
+        "left",
+        `${currentLeft - overflowRight}px`,
+        "important",
+      );
+    }
+
+    rect = element.getBoundingClientRect();
+    const overflowLeft = POPUP_BOUNDS.leftEdgeOffset - rect.left;
+    if (overflowLeft <= 0) return;
+
+    const currentLeft = parseFloat(element.style.left) || 0;
+    const nextLeft = currentLeft + overflowLeft;
+    const maxWidth = Math.max(0, rect.right - POPUP_BOUNDS.leftEdgeOffset);
+    element.style.setProperty("left", `${nextLeft}px`, "important");
+    element.style.setProperty("width", `${maxWidth}px`, "important");
+  };
+
+  /**
+   * リサイズハンドルの SVG を返す。
+   *
+   * @returns {string} SVG markup。
+   */
+  const renderResizeHandleIcon = () => `
+    <svg width="14" height="14" viewBox="0 0 14 14" fill="none" xmlns="http://www.w3.org/2000/svg" style="transform:rotate(90deg)" aria-hidden="true" focusable="false">
+      <line x1="13" y1="13" x2="1"  y2="1"  stroke="#555" stroke-width="1.5" stroke-linecap="round"/>
+      <line x1="13" y1="9"  x2="5"  y2="1"  stroke="#555" stroke-width="1.5" stroke-linecap="round"/>
+      <line x1="13" y1="5"  x2="9"  y2="1"  stroke="#555" stroke-width="1.5" stroke-linecap="round"/>
+    </svg>`;
+
+  /**
+   * @typedef {object} ResizeHandleOptions
+   * @property {string} handleClass - ハンドル要素の class。
+   * @property {number} minWidth - 最小幅 px。
+   * @property {number} minHeight - 最小高さ px。
+   * @property {boolean} [resizeHeight=true] - 高さも変更するか。
+   * @property {(element: HTMLElement) => HTMLElement} [getHeightTarget] - 高さを変更する要素。
+   * @property {boolean} [syncMaxHeight=false] - height と max-height を同じ値にするか。
+   * @property {(element: HTMLElement) => void} [onResize] - サイズ更新後の同期処理。
+   */
+
+  /**
+   * popup にドラッグ可能なリサイズハンドルを追加する。
+   *
+   * @param {HTMLElement} element - リサイズ対象 popup。
+   * @param {ResizeHandleOptions} options - ハンドル設定。
+   * @returns {void}
+   */
+  const addResizeHandle = (
+    element,
+    {
+      handleClass,
+      minWidth,
+      minHeight,
+      resizeHeight = true,
+      getHeightTarget,
+      syncMaxHeight = false,
+      onResize,
+    },
+  ) => {
+    if (element.querySelector(`.${handleClass}`)) return;
+
+    const computed = element.ownerDocument.defaultView?.getComputedStyle(element);
+    if (computed?.position === "static") {
+      element.style.position = "relative";
+    }
+
+    const handle = element.ownerDocument.createElement("div");
+    handle.className = handleClass;
+    handle.innerHTML = renderResizeHandleIcon();
+    element.appendChild(handle);
+
+    handle.addEventListener("pointerdown", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      handle.setPointerCapture(event.pointerId);
+
+      const startX = event.clientX;
+      const startY = event.clientY;
+      const startWidth = element.offsetWidth;
+      const heightTarget = getHeightTarget?.(element) ?? element;
+      const startHeight = heightTarget.offsetHeight;
+
+      const onPointerMove = (moveEvent) => {
+        const nextWidth = Math.max(
+          minWidth,
+          startWidth + moveEvent.clientX - startX,
+        );
+        element.style.setProperty("width", `${nextWidth}px`, "important");
+
+        if (resizeHeight) {
+          const nextHeight = Math.max(
+            minHeight,
+            startHeight + moveEvent.clientY - startY,
+          );
+          const heightValue = `${nextHeight}px`;
+          heightTarget.style.setProperty("height", heightValue, "important");
+          if (syncMaxHeight) {
+            heightTarget.style.setProperty(
+              "max-height",
+              heightValue,
+              "important",
+            );
+          }
+        }
+
+        onResize?.(element);
+      };
+
+      const onPointerUp = (upEvent) => {
+        if (handle.hasPointerCapture(upEvent.pointerId)) {
+          handle.releasePointerCapture(upEvent.pointerId);
+        }
+        handle.removeEventListener("pointermove", onPointerMove);
+        handle.removeEventListener("pointerup", onPointerUp);
+        handle.removeEventListener("pointercancel", onPointerUp);
+      };
+
+      handle.addEventListener("pointermove", onPointerMove);
+      handle.addEventListener("pointerup", onPointerUp);
+      handle.addEventListener("pointercancel", onPointerUp);
+    });
+  };
+
+  /**
+   * コメント popup の状態を同期する。
+   *
+   * @param {HTMLElement} element - `.docos-anchoreddocoview` 要素。
+   * @returns {void}
+   */
+  const syncCommentPopup = (element) => {
+    addResizeHandle(element, {
+      handleClass: COMMENT_HANDLE_CLASS,
+      minWidth: COMMENT_MIN_WIDTH,
+      minHeight: COMMENT_MIN_HEIGHT,
+      resizeHeight: false,
+      onResize: clampPopupBounds,
+    });
+    clampPopupBounds(element);
+  };
 
   /**
    * 保存済みの diff レイアウト設定を読む。
    *
+   * @param {Document} doc - localStorage を読む document。
    * @returns {"vertical" | "horizontal"} 保存値。不正値や読み取り失敗時は `"vertical"`。
    */
-  const readStoredDiffLayout = () => {
+  const readStoredDiffLayout = (doc) => {
     try {
-      return localStorage.getItem(BLAME_DIFF_LAYOUT_KEY) === "horizontal"
+      return doc.defaultView?.localStorage.getItem(BLAME_DIFF_LAYOUT_KEY) ===
+        "horizontal"
         ? "horizontal"
         : "vertical";
     } catch {
@@ -550,12 +603,13 @@
   /**
    * diff レイアウト設定を localStorage に保存する。
    *
+   * @param {Document} doc - localStorage を持つ document。
    * @param {"vertical" | "horizontal"} layout - 保存する表示方向。
    * @returns {void}
    */
-  const writeStoredDiffLayout = (layout) => {
+  const writeStoredDiffLayout = (doc, layout) => {
     try {
-      localStorage.setItem(BLAME_DIFF_LAYOUT_KEY, layout);
+      doc.defaultView?.localStorage.setItem(BLAME_DIFF_LAYOUT_KEY, layout);
     } catch {}
   };
 
@@ -567,15 +621,25 @@
    * @returns {void}
    */
   const setDiffLayout = (doc, layout) => {
-    doc.documentElement.setAttribute("data-widen-diff-layout", layout);
+    doc.documentElement.setAttribute(BLAME_DIFF_LAYOUT_ATTR, layout);
   };
 
-  setDiffLayout(document, readStoredDiffLayout());
+  /**
+   * document に diff レイアウトの初期値を設定する。
+   *
+   * @param {Document} doc - 対象 document。
+   * @returns {void}
+   */
+  const ensureDiffLayout = (doc) => {
+    if (!doc.documentElement.hasAttribute(BLAME_DIFF_LAYOUT_ATTR)) {
+      setDiffLayout(doc, readStoredDiffLayout(doc));
+    }
+  };
 
   /**
    * manifest で先読みしている jsdiff の global export を取得する。
    *
-   * @returns {typeof globalThis.Diff | null} jsdiff API。読み込み失敗時は null。
+   * @returns {{diffWordsWithSpace?: (oldText: string, newText: string) => Array<{value: string, added?: boolean, removed?: boolean}>} | null} jsdiff API。
    */
   const getJsDiff = () => globalThis.Diff ?? null;
 
@@ -590,14 +654,16 @@
    */
   const appendText = (doc, parent, text, className = "") => {
     if (!text) return;
-    const node = className
-      ? doc.createElement("span")
-      : doc.createTextNode(text);
-    if (className) {
-      node.className = className;
-      node.textContent = text;
+
+    if (!className) {
+      parent.appendChild(doc.createTextNode(text));
+      return;
     }
-    parent.appendChild(node);
+
+    const span = doc.createElement("span");
+    span.className = className;
+    span.textContent = text;
+    parent.appendChild(span);
   };
 
   /**
@@ -615,6 +681,7 @@
     for (const part of parts) {
       if (type === "del" && part.added) continue;
       if (type === "add" && part.removed) continue;
+
       const tokenClass =
         type === "del" && part.removed
           ? "widen-diff-token-del"
@@ -639,14 +706,42 @@
     const block = doc.createElement("div");
     block.className = "widen-diff-block widen-diff-replacement";
 
-    const diff = getJsDiff();
-    const parts = diff?.diffWordsWithSpace?.(oldText, newText) ?? [
+    const parts = getJsDiff()?.diffWordsWithSpace?.(oldText, newText) ?? [
       { value: oldText, removed: true },
       { value: newText, added: true },
     ];
 
     block.appendChild(createDiffRow(doc, "del", parts));
     block.appendChild(createDiffRow(doc, "add", parts));
+    return block;
+  };
+
+  /**
+   * 追加のみ・削除のみ・中立表示の diff block を作成する。
+   *
+   * @param {Document} doc - ノードを作成する document。
+   * @param {"add" | "del" | "neutral"} type - diff 行の種類。
+   * @param {string} content - 表示するテキスト。
+   * @returns {HTMLDivElement} 単一行 diff block。
+   */
+  const createSingleDiffBlock = (doc, type, content) => {
+    const block = doc.createElement("div");
+    block.className = "widen-diff-block";
+
+    const row = doc.createElement("span");
+    row.className = `widen-diff-row widen-diff-${type}`;
+    appendText(
+      doc,
+      row,
+      content,
+      type === "add"
+        ? "widen-diff-token-add"
+        : type === "del"
+          ? "widen-diff-token-del"
+          : "",
+    );
+
+    block.appendChild(row);
     return block;
   };
 
@@ -673,22 +768,23 @@
   };
 
   /**
-   * document 内の diff レイアウト切替ボタンのアイコンとアクセシビリティ属性を更新する。
+   * document 内の diff レイアウト切替ボタンの表示を更新する。
    *
    * @param {Document} doc - 更新対象 document。
    * @returns {void}
    */
   const updateDiffLayoutButtons = (doc) => {
     const layout =
-      doc.documentElement.getAttribute("data-widen-diff-layout") || "vertical";
+      doc.documentElement.getAttribute(BLAME_DIFF_LAYOUT_ATTR) || "vertical";
+    const nextLabel =
+      layout === "horizontal" ? "差分を縦に並べる" : "差分を横に並べる";
+
     doc.querySelectorAll(`.${BLAME_DIFF_TOGGLE_CLASS}`).forEach((button) => {
-      button.innerHTML = renderLayoutIcon(layout);
-      button.title =
-        layout === "horizontal" ? "差分を縦に並べる" : "差分を横に並べる";
-      button.setAttribute(
-        "aria-label",
-        layout === "horizontal" ? "差分を縦に並べる" : "差分を横に並べる",
+      button.innerHTML = renderLayoutIcon(
+        /** @type {"vertical" | "horizontal"} */ (layout),
       );
+      button.title = nextLabel;
+      button.setAttribute("aria-label", nextLabel);
       button.setAttribute("aria-pressed", String(layout === "horizontal"));
     });
   };
@@ -701,34 +797,32 @@
    */
   const toggleDiffLayout = (doc) => {
     const current =
-      doc.documentElement.getAttribute("data-widen-diff-layout") || "vertical";
+      doc.documentElement.getAttribute(BLAME_DIFF_LAYOUT_ATTR) || "vertical";
     const next = current === "horizontal" ? "vertical" : "horizontal";
     setDiffLayout(doc, next);
-    writeStoredDiffLayout(next);
+    writeStoredDiffLayout(doc, next);
     updateDiffLayoutButtons(doc);
   };
 
   /**
    * 編集履歴の action label と切替ボタンを flex row にまとめる。
    *
-   * @param {Element} target - `.docs-blameview-value-content` またはその中の `.docs-blame-bold-text`。
+   * @param {Element} target - `.docs-blameview-value-content` またはその中の action label。
    * @returns {void}
    */
   const addDiffLayoutToggle = (target) => {
     const valueContent =
-      target.closest?.(".docs-blameview-value-content") ?? target;
+      target.closest?.(SELECTORS.blameValueContent) ?? target;
     if (valueContent.querySelector(`.${BLAME_DIFF_TOGGLE_CLASS}`)) return;
 
     const doc = valueContent.ownerDocument;
     const anchor = target.classList?.contains("docs-blame-bold-text")
       ? target
-      : valueContent.querySelector(".docs-blame-bold-text");
+      : valueContent.querySelector(SELECTORS.blameBoldText);
     if (!anchor) return;
 
-    injectBlameDiffStyle(doc);
-    if (!doc.documentElement.hasAttribute("data-widen-diff-layout")) {
-      setDiffLayout(doc, readStoredDiffLayout());
-    }
+    injectCSS(doc, STYLE_IDS.diff, diffCSS);
+    ensureDiffLayout(doc);
 
     const button = doc.createElement("button");
     button.type = "button";
@@ -748,393 +842,303 @@
   };
 
   /**
-   * 編集履歴 popup に追加される action label を監視し、diff レイアウト切替ボタンを補完する。
+   * Google Sheets が通常値の外側に付ける引用符を除去する。
    *
-   * @param {Document} root - 監視対象 document。
-   * @returns {void}
+   * @param {string} value - 元文字列。
+   * @returns {string} 前後空白と外側 quote を除いた文字列。
    */
-  const observeDiffLayoutToggles = (root) => {
-    root
-      .querySelectorAll(".docs-blameview-value-content .docs-blame-bold-text")
-      .forEach(addDiffLayoutToggle);
+  const stripBlameValueQuotes = (value) =>
+    value.trim().replace(/^["「]|["」]$/g, "");
 
-    const obs = new MutationObserver((mutations) => {
-      for (const mutation of mutations) {
-        for (const node of mutation.addedNodes) {
-          if (node.nodeType !== Node.ELEMENT_NODE) continue;
-          if (
-            node.classList?.contains("docs-blame-bold-text") &&
-            node.closest?.(".docs-blameview-value-content")
-          ) {
-            addDiffLayoutToggle(node);
-          }
-          node
-            .querySelectorAll?.(
-              ".docs-blameview-value-content .docs-blame-bold-text",
-            )
-            .forEach(addDiffLayoutToggle);
-        }
-      }
-    });
+  /**
+   * 編集履歴値として扱える数式 span か判定する。
+   *
+   * @param {Node} node - 判定対象 node。
+   * @returns {boolean} 数式値 span なら true。
+   */
+  const isFormulaValueNode = (node) =>
+    isElementNode(node) &&
+    node.classList.contains("waffle-blameview-formula-text") &&
+    Boolean(node.textContent?.trim());
 
-    try {
-      obs.observe(root.body || root.documentElement, {
-        childList: true,
-        subtree: true,
-      });
-    } catch {}
+  /**
+   * 編集履歴値として扱える直下 node か判定する。
+   *
+   * @param {Node} node - `.docs-blameview-value-content` の直下 node。
+   * @returns {boolean} 通常値 text node または数式値 span なら true。
+   */
+  const isBlameValueNode = (node) => {
+    if (node.nodeType === Node.TEXT_NODE) {
+      return stripBlameValueQuotes(node.textContent ?? "").length > 0;
+    }
+
+    return isFormulaValueNode(node);
   };
 
   /**
-   * 追加のみ・削除のみ・中立表示の diff block を作成する。
+   * 編集履歴値 node から diff 対象文字列を取り出す。
    *
-   * @param {Document} doc - ノードを作成する document。
-   * @param {"add" | "del" | "neutral"} type - diff 行の種類。
-   * @param {string} content - 表示するテキスト。
-   * @returns {HTMLDivElement} 単一行 diff block。
+   * 数式 span の中にあるダブルクォートは数式本体なので保持し、通常 text node では
+   * Google Sheets が外側に付ける引用符だけを除去する。
+   *
+   * @param {Node} node - 値として扱う node。
+   * @returns {string} diff 対象文字列。
    */
-  const createSingleDiffBlock = (doc, type, content) => {
-    const block = doc.createElement("div");
-    block.className = "widen-diff-block";
-    const row = doc.createElement("span");
-    row.className = `widen-diff-row widen-diff-${type}`;
+  const getBlameValueText = (node) =>
+    isFormulaValueNode(node)
+      ? (node.textContent ?? "").trim()
+      : stripBlameValueQuotes(node.textContent ?? "");
 
-    appendText(
-      doc,
-      row,
-      content,
-      type === "add"
-        ? "widen-diff-token-add"
-        : type === "del"
-          ? "widen-diff-token-del"
-          : "",
+  /**
+   * action label として扱う bold span か判定する。
+   *
+   * @param {Node} node - 判定対象 node。
+   * @returns {node is Element} action label なら true。
+   */
+  const isBlameBoldText = (node) =>
+    isElementNode(node) && node.classList.contains("docs-blame-bold-text");
+
+  /**
+   * action label より後ろの既存 node を削除する。
+   *
+   * @param {Element} valueContent - 編集履歴値の root 要素。
+   * @param {Element | null} actionLabel - 残す action label。null の場合は全 node を削除。
+   * @returns {void}
+   */
+  const removeNodesAfterActionLabel = (valueContent, actionLabel) => {
+    const childNodes = Array.from(valueContent.childNodes);
+    const actionIndex = actionLabel ? childNodes.indexOf(actionLabel) : -1;
+
+    childNodes
+      .filter((node, index) => (actionLabel ? index > actionIndex : true))
+      .forEach((node) => node.parentNode?.removeChild(node));
+  };
+
+  /**
+   * @typedef {object} ReplacementBlameChange
+   * @property {"replace"} type - 置換履歴。
+   * @property {Element | null} actionLabel - 表示に残す action label。
+   * @property {string} oldText - 変更前テキスト。
+   * @property {string} newText - 変更後テキスト。
+   *
+   * @typedef {object} SingleBlameChange
+   * @property {"add" | "del" | "neutral"} type - 追加・削除・その他履歴。
+   * @property {Element} actionLabel - 表示に残す action label。
+   * @property {string} content - 表示テキスト。
+   *
+   * @typedef {ReplacementBlameChange | SingleBlameChange} BlameChange
+   */
+
+  /**
+   * Google Sheets の編集履歴値 DOM から、差分表示に必要な情報だけを取り出す。
+   *
+   * @param {Element} valueContent - `.docs-blameview-value-content` 要素。
+   * @returns {BlameChange | null} 対応できる変更情報。未対応 DOM なら null。
+   */
+  const parseBlameChange = (valueContent) => {
+    const childNodes = Array.from(valueContent.childNodes);
+    const boldLabels = childNodes.filter(isBlameBoldText);
+    const fromLabel = boldLabels.find(
+      (label) => label.textContent?.trim() === "から",
     );
-    block.appendChild(row);
-    return block;
+
+    if (fromLabel) {
+      const fromIndex = childNodes.indexOf(fromLabel);
+      const oldValueNode = childNodes
+        .slice(0, fromIndex)
+        .reverse()
+        .find(isBlameValueNode);
+      const newValueNode = childNodes.slice(fromIndex + 1).find(isBlameValueNode);
+
+      if (!oldValueNode || !newValueNode) return null;
+
+      return {
+        type: "replace",
+        actionLabel: boldLabels.find((label) => label !== fromLabel) ?? null,
+        oldText: getBlameValueText(oldValueNode),
+        newText: getBlameValueText(newValueNode),
+      };
+    }
+
+    if (boldLabels.length !== 1) return null;
+
+    const actionLabel = boldLabels[0];
+    const actionText = actionLabel.textContent ?? "";
+    const contentNode = childNodes
+      .slice(childNodes.indexOf(actionLabel) + 1)
+      .find(isBlameValueNode);
+
+    if (!contentNode) return null;
+
+    return {
+      type: actionText.includes("追加")
+        ? "add"
+        : actionText.includes("削除")
+          ? "del"
+          : "neutral",
+      actionLabel,
+      content: getBlameValueText(contentNode),
+    };
   };
 
   /**
    * Google Sheets の編集履歴値 DOM を読み取り、差分表示用 DOM に置き換える。
-   *
-   * 通常セルは text node、数式セルは `.waffle-blameview-formula-text` に値が入るため、
-   * どちらも同じ抽出処理に流す。再描画済みの要素は属性でスキップする。
    *
    * @param {Element} valueContent - `.docs-blameview-value-content` 要素。
    * @returns {void}
    */
   const transformDiff = (valueContent) => {
     if (valueContent.hasAttribute(BLAME_DIFF_ATTR)) return;
+
     if (valueContent.querySelector(".widen-diff-block")) {
       valueContent.setAttribute(BLAME_DIFF_ATTR, "1");
       addDiffLayoutToggle(valueContent);
       return;
     }
 
-    // 直下テキストノードを順にたどる
-    const childNodes = Array.from(valueContent.childNodes);
-    /**
-     * Google Sheets が通常値の外側に付ける引用符を除去する。
-     *
-     * @param {string} s - 元文字列。
-     * @returns {string} 前後空白と外側 quote を除いた文字列。
-     */
-    const strip = (s) => s.trim().replace(/^["「]|["」]$/g, "");
-    /**
-     * 編集履歴の値として扱える直下ノードか判定する。
-     *
-     * @param {Node} node - `.docs-blameview-value-content` の直下ノード。
-     * @returns {boolean} 通常値 text node または数式値 span なら true。
-     */
-    const isValueNode = (node) => {
-      if (node.nodeType === Node.TEXT_NODE) {
-        return strip(node.textContent).length > 0;
-      }
-      return (
-        node.nodeType === Node.ELEMENT_NODE &&
-        node.classList?.contains("waffle-blameview-formula-text") &&
-        node.textContent.trim()
-      );
-    };
-    /**
-     * 値ノードから diff に渡す文字列を取り出す。
-     *
-     * 数式 span の中にあるダブルクォートは数式本体なので保持し、
-     * 通常 text node では Google Sheets が外側に付ける引用符だけを除去する。
-     *
-     * @param {Node} node - 値として扱うノード。
-     * @returns {string} diff 対象文字列。
-     */
-    const valueText = (node) => {
-      if (
-        node.nodeType === Node.ELEMENT_NODE &&
-        node.classList?.contains("waffle-blameview-formula-text")
-      ) {
-        return (node.textContent ?? "").trim();
-      }
-      return strip(node.textContent ?? "");
-    };
+    const change = parseBlameChange(valueContent);
+    if (!change) return;
 
-    // 「からX」パターン: boldSpan(置き換えました:) + textNode(旧) + boldSpan(から) + textNode(新)
-    const boldSpans = childNodes.filter(
-      (n) =>
-        n.nodeType === Node.ELEMENT_NODE &&
-        n.classList?.contains("docs-blame-bold-text"),
-    );
+    valueContent.setAttribute(BLAME_DIFF_ATTR, "1");
+    removeNodesAfterActionLabel(valueContent, change.actionLabel);
 
-    // ── パターンA: span(置き換えました:) + 値 + span(から) + 値 ──
-    // 「から」を含むspanを探してパターン確認
-    const fromSpan = boldSpans.find((s) => s.textContent?.trim() === "から");
-    if (fromSpan) {
-      const fromSpanIdx = childNodes.indexOf(fromSpan);
-      // 「から」の直前の値が旧テキスト、直後の値が新テキスト
-      const oldValueNode = childNodes
-        .slice(0, fromSpanIdx)
-        .reverse()
-        .find(isValueNode);
-      const newValueNode = childNodes.slice(fromSpanIdx + 1).find(isValueNode);
-
-      if (!oldValueNode || !newValueNode) return;
-
-      const oldText = valueText(oldValueNode);
-      const newText = valueText(newValueNode);
-
-      // マーク済みにしてから再描画
-      valueContent.setAttribute(BLAME_DIFF_ATTR, "1");
-
-      // アクションラベル（「置き換えました:」など）だけ残して後ろを差し替える
-      const actionSpan = boldSpans.find((s) => s !== fromSpan);
-      // 「から」以降の既存ノードを削除
-      const toRemove = childNodes.filter((n) => {
-        const idx = childNodes.indexOf(n);
-        // actionSpan より後ろを全部削除
-        return actionSpan ? idx > childNodes.indexOf(actionSpan) : true;
-      });
-      toRemove.forEach((n) => n.parentNode?.removeChild(n));
-
-      const block = createReplacementDiffBlock(
-        valueContent.ownerDocument,
-        oldText,
-        newText,
-      );
-      if (actionSpan) addDiffLayoutToggle(actionSpan);
-      valueContent.appendChild(block);
-      return;
+    if (change.actionLabel) {
+      addDiffLayoutToggle(change.actionLabel);
     }
 
-    // ── パターンB: span(追加しました: / 削除しました:) + textNode(テキスト) ──
-    if (boldSpans.length === 1) {
-      const actionSpan = boldSpans[0];
-      const actionText = actionSpan.textContent ?? "";
-      const contentNode = childNodes
-        .slice(childNodes.indexOf(actionSpan) + 1)
-        .find(isValueNode);
-
-      if (!contentNode) return;
-
-      const content = valueText(contentNode);
-      // マーク済みにしてから再描画
-      valueContent.setAttribute(BLAME_DIFF_ATTR, "1");
-
-      // actionSpan より後ろを削除
-      const toRemove = childNodes.filter(
-        (n) => childNodes.indexOf(n) > childNodes.indexOf(actionSpan),
-      );
-      toRemove.forEach((n) => n.parentNode?.removeChild(n));
-
-      const type = actionText.includes("追加")
-        ? "add"
-        : actionText.includes("削除")
-          ? "del"
-          : "neutral";
-      const block = createSingleDiffBlock(
-        valueContent.ownerDocument,
-        type,
-        content,
-      );
-      addDiffLayoutToggle(actionSpan);
-      valueContent.appendChild(block);
-    }
+    const doc = valueContent.ownerDocument;
+    const block =
+      change.type === "replace"
+        ? createReplacementDiffBlock(doc, change.oldText, change.newText)
+        : createSingleDiffBlock(doc, change.type, change.content);
+    valueContent.appendChild(block);
   };
 
   /**
    * 編集履歴 value content の追加・更新を監視し、差分表示へ変換する。
    *
-   * @param {Document} root - 監視対象 document。
+   * @param {Document} doc - 監視対象 document。
    * @returns {void}
    */
-  const observeDiff = (root) => {
-    injectBlameDiffStyle(root.ownerDocument || root);
+  const observeDiff = (doc) => {
+    if (!doc || observedDiffDocuments.has(doc)) return;
+    observedDiffDocuments.add(doc);
 
-    // 既存要素に適用
-    root
-      .querySelectorAll(".docs-blameview-value-content")
-      .forEach(transformDiff);
+    injectCSS(doc, STYLE_IDS.diff, diffCSS);
+    ensureDiffLayout(doc);
+    doc.querySelectorAll(SELECTORS.blameValueContent).forEach(transformDiff);
 
-    // 動的に追加・更新される要素を監視
-    const obs = new MutationObserver((mutations) => {
+    const observer = new MutationObserver((mutations) => {
       const touched = new Set();
-      for (const m of mutations) {
-        const vc = m.target.closest?.(".docs-blameview-value-content") ?? null;
-        if (vc) touched.add(vc);
-        m.addedNodes.forEach((n) => {
-          if (n.nodeType !== Node.ELEMENT_NODE) return;
-          if (n.classList?.contains("docs-blameview-value-content"))
-            touched.add(n);
-          n.querySelectorAll?.(".docs-blameview-value-content").forEach((el) =>
-            touched.add(el),
-          );
-        });
+
+      for (const mutation of mutations) {
+        const valueContent = isElementNode(mutation.target)
+          ? mutation.target.closest?.(SELECTORS.blameValueContent)
+          : null;
+        if (valueContent) touched.add(valueContent);
+
+        for (const node of mutation.addedNodes) {
+          if (!isElementNode(node)) continue;
+          if (node.matches(SELECTORS.blameValueContent)) touched.add(node);
+          node
+            .querySelectorAll?.(SELECTORS.blameValueContent)
+            .forEach((element) => touched.add(element));
+        }
       }
-      touched.forEach((el) => {
-        el.removeAttribute(BLAME_DIFF_ATTR); // 再描画許可
-        transformDiff(el);
+
+      touched.forEach((element) => {
+        element.removeAttribute(BLAME_DIFF_ATTR);
+        transformDiff(element);
       });
     });
 
-    try {
-      obs.observe(root.body || root.documentElement, {
-        childList: true,
-        subtree: true,
-      });
-    } catch {}
+    observer.observe(doc.body || doc.documentElement, {
+      childList: true,
+      subtree: true,
+    });
   };
-
-  observeDiff(document);
-  observeDiffLayoutToggles(document);
-
-  // ── 編集履歴ポップアップ（.waffle-blameview）リサイズハンドル ──────────────
-
-  const BLAME_HANDLE_CLASS = "widen-ext-blame-handle";
-  const BLAME_DEFAULT_WIDTH = 320;
-  const BLAME_VALUE_MAX_HEIGHT = 240;
-  const BLAME_VALUE_MIN_HEIGHT = 120;
-  const scheduledBlameBottomClamps = new WeakSet();
-
-  const blameHandleCSS = `
-    .waffle-blameview {
-      overflow: hidden !important;
-      box-sizing: border-box !important;
-    }
-    .waffle-blameview .docs-blameview {
-      /*
-       * Google Sheets 標準の .docs-blameview は width: 240px を持つ。
-       * 外側 popup を広げても中身だけ固定幅になるため、内側も親幅へ追従させる。
-       */
-      width: 100% !important;
-      max-width: none !important;
-    }
-    .waffle-blameview .docs-blameview-content,
-    .waffle-blameview .docs-blameview-valuecontainer,
-    .waffle-blameview .docs-blameview-value-content {
-      /*
-       * 値表示まわりにも固定幅や shrink しやすい計算が残ることがある。
-       * diff block を含む本文を、広げた popup の横幅いっぱいに使わせる。
-       */
-      width: 100% !important;
-      max-width: none !important;
-      min-width: 0 !important;
-    }
-    .waffle-blameview > *:not(.${BLAME_HANDLE_CLASS}),
-    .waffle-blameview * {
-      box-sizing: border-box !important;
-    }
-    .waffle-blameview .docs-blameview-valuecontainer {
-      /*
-       * 編集履歴本文だけをスクロール領域にする。popup 全体に max-height を付けると
-       * warning や feedback の高さまで圧縮対象になり、Google Sheets 標準 UI が崩れる。
-       */
-      min-height: 0 !important;
-      max-height: ${BLAME_VALUE_MAX_HEIGHT}px !important;
-      overflow: auto !important;
-    }
-    .${BLAME_HANDLE_CLASS} {
-      position: absolute;
-      bottom: 0;
-      right: 0;
-      width: 18px;
-      height: 18px;
-      cursor: se-resize;
-      z-index: 99999;
-      box-sizing: border-box;
-      background: transparent;
-      display: flex;
-      align-items: flex-end;
-      justify-content: flex-end;
-      padding: 2px;
-      flex: none !important;
-    }
-    .${BLAME_HANDLE_CLASS} svg {
-      pointer-events: none;
-      opacity: 0.45;
-      transition: opacity 0.15s;
-    }
-    .${BLAME_HANDLE_CLASS}:hover svg {
-      opacity: 0.85;
-    }
-  `;
 
   /**
-   * 編集履歴 popup のリサイズハンドル CSS を指定 document に一度だけ注入する。
+   * 編集履歴 popup に追加される action label を監視し、diff レイアウト切替ボタンを補完する。
    *
-   * @param {Document} doc - CSS を注入する document。
+   * @param {Document} doc - 監視対象 document。
    * @returns {void}
    */
-  const injectBlameHandleStyle = (doc) => {
-    const id = "widen-ext-blame-handle-style";
-    if (!doc || doc.getElementById(id)) return;
-    const style = doc.createElement("style");
-    style.id = id;
-    style.textContent = blameHandleCSS;
-    (doc.head || doc.documentElement).appendChild(style);
-  };
+  const observeDiffLayoutToggles = (doc) => {
+    if (!doc || observedDiffToggleDocuments.has(doc)) return;
+    observedDiffToggleDocuments.add(doc);
 
-  injectBlameHandleStyle(document);
+    doc
+      .querySelectorAll(
+        `${SELECTORS.blameValueContent} ${SELECTORS.blameBoldText}`,
+      )
+      .forEach(addDiffLayoutToggle);
+
+    const observer = new MutationObserver((mutations) => {
+      for (const mutation of mutations) {
+        for (const node of mutation.addedNodes) {
+          if (!isElementNode(node)) continue;
+
+          if (
+            node.matches(SELECTORS.blameBoldText) &&
+            node.closest?.(SELECTORS.blameValueContent)
+          ) {
+            addDiffLayoutToggle(node);
+          }
+
+          node
+            .querySelectorAll?.(
+              `${SELECTORS.blameValueContent} ${SELECTORS.blameBoldText}`,
+            )
+            .forEach(addDiffLayoutToggle);
+        }
+      }
+    });
+
+    observer.observe(doc.body || doc.documentElement, {
+      childList: true,
+      subtree: true,
+    });
+  };
 
   /**
    * 編集履歴 popup を次回表示用の初期状態へ戻す。
    *
    * `.waffle-blameview` は閉じても DOM に残るため、ドラッグで付けた inline style も
-   * 次回表示に持ち越される。幅はユーザ設定のデフォルトへ戻し、高さは Sheets 側の
-   * 自然な計算に戻すため inline height を削除する。
+   * 次回表示に持ち越される。幅はデフォルトへ戻し、高さは Sheets 側の自然な計算に戻す。
    *
-   * @param {HTMLElement} el - `.waffle-blameview` 要素。
+   * @param {HTMLElement} element - `.waffle-blameview` 要素。
    * @returns {void}
    */
-  const resetBlamePopupState = (el) => {
+  const resetBlamePopupState = (element) => {
     const width = `${BLAME_DEFAULT_WIDTH}px`;
-    if (el.style.getPropertyValue("width") !== width) {
-      el.style.setProperty("width", width, "important");
+    if (element.style.getPropertyValue("width") !== width) {
+      element.style.setProperty("width", width, "important");
     }
-    const blameView = el.querySelector(".docs-blameview");
+
+    const blameView = element.querySelector(SELECTORS.blameView);
     if (blameView?.style.getPropertyValue("width") !== "100%") {
       blameView?.style.setProperty("width", "100%", "important");
     }
-    if (el.style.getPropertyValue("height")) {
-      el.style.removeProperty("height");
-    }
-    // 高さのドラッグ対象は本文領域だけ。閉じたら本文の inline height も消す。
-    const valueContainer = el.querySelector(".docs-blameview-valuecontainer");
-    if (valueContainer?.style.getPropertyValue("height")) {
-      valueContainer.style.removeProperty("height");
-    }
-    if (valueContainer?.style.getPropertyValue("max-height")) {
-      valueContainer.style.removeProperty("max-height");
-    }
+
+    element.style.removeProperty("height");
+
+    const valueContainer = element.querySelector(SELECTORS.blameValueContainer);
+    valueContainer?.style.removeProperty("height");
+    valueContainer?.style.removeProperty("max-height");
   };
 
   /**
    * 編集履歴 popup が画面上に表示されているか判定する。
    *
-   * 閉じた popup は DOM に残るため、isConnected だけでは表示状態を判定できない。
-   * 非表示中は次回表示用の初期化、表示中は境界補正を行うために使う。
-   *
-   * @param {HTMLElement} el - `.waffle-blameview` 要素。
+   * @param {HTMLElement} element - `.waffle-blameview` 要素。
    * @returns {boolean} 表示中なら true。
    */
-  const isBlamePopupVisible = (el) => {
-    if (!el.isConnected) return false;
-    const rect = el.getBoundingClientRect();
-    const style = el.ownerDocument.defaultView?.getComputedStyle(el);
+  const isBlamePopupVisible = (element) => {
+    if (!element.isConnected) return false;
+
+    const rect = element.getBoundingClientRect();
+    const style = element.ownerDocument.defaultView?.getComputedStyle(element);
     return (
       rect.width > 0 &&
       rect.height > 0 &&
@@ -1144,63 +1148,57 @@
   };
 
   /**
-   * 編集履歴 popup が画面下端からはみ出す場合、Sheets が決めた top を最小限だけ上へ補正する。
+   * 編集履歴 popup が画面下端からはみ出す場合、top を最小限だけ上へ補正する。
    *
-   * 通常の配置は Sheets に任せる。下端に届いた場合だけ、本文をさらに小さくする代わりに
-   * popup 全体を上へ逃がして BOTTOM_EDGE_OFFSET を確保する。
-   *
-   * @param {HTMLElement} el - `.waffle-blameview` 要素。
+   * @param {HTMLElement} element - `.waffle-blameview` 要素。
    * @returns {void}
    */
-  const clampBlameBottomPosition = (el) => {
-    const view = el.ownerDocument.defaultView ?? window;
-    const rect = el.getBoundingClientRect();
+  const clampBlameBottomPosition = (element) => {
+    const view = element.ownerDocument.defaultView ?? window;
+    const rect = element.getBoundingClientRect();
     if (rect.width === 0 && rect.height === 0) return;
 
-    const overflowBottom = rect.bottom - view.innerHeight + BOTTOM_EDGE_OFFSET;
+    const overflowBottom =
+      rect.bottom - view.innerHeight + POPUP_BOUNDS.bottomEdgeOffset;
     if (overflowBottom <= 0) return;
 
-    const currentTop = Number.isNaN(parseFloat(el.style.top))
-      ? rect.top
-      : parseFloat(el.style.top);
-    const nextTop = Math.max(MARGIN, currentTop - overflowBottom);
-    el.style.setProperty("top", `${nextTop}px`, "important");
+    const inlineTop = parseFloat(element.style.top);
+    const currentTop = Number.isNaN(inlineTop) ? rect.top : inlineTop;
+    const nextTop = Math.max(POPUP_BOUNDS.margin, currentTop - overflowBottom);
+    element.style.setProperty("top", `${nextTop}px`, "important");
   };
 
   /**
    * 編集履歴本文の描画完了を待ちながら、数 frame だけ下端補正を再試行する。
    *
-   * Sheets は popup 外枠と位置を先に更新し、その後に valuecontainer の内容を描画する
-   * ことがある。同期直後の 1 回だけでは高さ計算が早すぎるため、短い rAF チェーンで
-   * 後続描画を拾う。
-   *
-   * @param {HTMLElement} el - `.waffle-blameview` 要素。
+   * @param {HTMLElement} element - `.waffle-blameview` 要素。
    * @returns {void}
    */
-  const scheduleBlameBottomClamp = (el) => {
-    if (scheduledBlameBottomClamps.has(el)) return;
-    scheduledBlameBottomClamps.add(el);
+  const scheduleBlameBottomClamp = (element) => {
+    if (scheduledBlameBottomClamps.has(element)) return;
+    scheduledBlameBottomClamps.add(element);
 
-    const view = el.ownerDocument.defaultView;
+    const view = element.ownerDocument.defaultView;
     if (!view) {
-      scheduledBlameBottomClamps.delete(el);
+      scheduledBlameBottomClamps.delete(element);
       return;
     }
 
-    let remaining = 4;
+    let remainingFrames = 4;
     const tick = () => {
-      if (!el.isConnected || !isBlamePopupVisible(el)) {
-        scheduledBlameBottomClamps.delete(el);
+      if (!element.isConnected || !isBlamePopupVisible(element)) {
+        scheduledBlameBottomClamps.delete(element);
         return;
       }
 
-      clampPopupBounds(el);
-      clampBlameBottomPosition(el);
-      remaining -= 1;
-      if (remaining > 0) {
+      clampPopupBounds(element);
+      clampBlameBottomPosition(element);
+      remainingFrames -= 1;
+
+      if (remainingFrames > 0) {
         view.requestAnimationFrame(tick);
       } else {
-        scheduledBlameBottomClamps.delete(el);
+        scheduledBlameBottomClamps.delete(element);
       }
     };
 
@@ -1210,76 +1208,65 @@
   /**
    * 編集履歴 popup の手動リサイズ直後に、左右と下端の境界補正を同期実行する。
    *
-   * ハンドルを下へドラッグして BOTTOM_EDGE_OFFSET を割る場合は、次の frame を待たず
-   * その場で top を上へ逃がす。これにより、下端余白を保ったまま本文領域を広げられる。
-   *
-   * @param {HTMLElement} el - `.waffle-blameview` 要素。
+   * @param {HTMLElement} element - `.waffle-blameview` 要素。
    * @returns {void}
    */
-  const syncBlameResizeBounds = (el) => {
-    clampPopupBounds(el);
-    clampBlameBottomPosition(el);
+  const syncBlameResizeBounds = (element) => {
+    clampPopupBounds(element);
+    clampBlameBottomPosition(element);
   };
 
   /**
-   * 編集履歴 popup にドラッグ可能なリサイズハンドルを追加する。
+   * 編集履歴 popup の状態を同期する。
    *
-   * @param {HTMLElement} el - `.waffle-blameview` 要素。
+   * @param {HTMLElement} element - `.waffle-blameview` 要素。
    * @returns {void}
    */
-  const addBlameResizeHandle = (el) => {
-    if (!el.querySelector(`.${BLAME_HANDLE_CLASS}`)) {
-      resetBlamePopupState(el);
-      addResizeHandle(el, {
+  const syncBlamePopup = (element) => {
+    if (!element.querySelector(`.${BLAME_HANDLE_CLASS}`)) {
+      resetBlamePopupState(element);
+      addResizeHandle(element, {
         handleClass: BLAME_HANDLE_CLASS,
-        minWidth: 200,
+        minWidth: BLAME_MIN_WIDTH,
         minHeight: BLAME_VALUE_MIN_HEIGHT,
-        // 高さ変更は履歴本文だけに限定し、warning / feedback / navigation の高さを保つ。
         getHeightTarget: (popup) =>
-          popup.querySelector(".docs-blameview-valuecontainer") ?? popup,
+          popup.querySelector(SELECTORS.blameValueContainer) ?? popup,
         syncMaxHeight: true,
         onResize: syncBlameResizeBounds,
       });
     }
 
-    if (isBlamePopupVisible(el)) {
-      clampPopupBounds(el);
-      clampBlameBottomPosition(el);
-      scheduleBlameBottomClamp(el);
-    } else {
-      resetBlamePopupState(el);
+    if (isBlamePopupVisible(element)) {
+      clampPopupBounds(element);
+      clampBlameBottomPosition(element);
+      scheduleBlameBottomClamp(element);
+      return;
     }
+
+    resetBlamePopupState(element);
   };
 
   /**
-   * 編集履歴 popup の追加を監視し、各 popup にリサイズハンドルを追加する。
+   * 1 つの document に、この拡張が必要とする style と DOM 監視を設定する。
    *
-   * @param {Document} root - 監視対象 document。
+   * @param {Document} doc - 対象 document。
    * @returns {void}
    */
-  const observeBlameView = (root) => {
-    observePopupInDoc(root, ".waffle-blameview", addBlameResizeHandle);
-  };
+  function setupDocument(doc) {
+    if (!doc || initializedDocuments.has(doc)) return;
+    initializedDocuments.add(doc);
 
-  observeBlameView(document);
+    injectCSS(doc, STYLE_IDS.comment, commentCSS);
+    injectCSS(doc, STYLE_IDS.diff, diffCSS);
+    injectCSS(doc, STYLE_IDS.blameHandle, blameHandleCSS);
+    ensureDiffLayout(doc);
 
-  // iframe 内にも適用
-  document.querySelectorAll("iframe").forEach((iframe) => {
-    /**
-     * iframe の contentDocument が読める場合だけ編集履歴 popup のリサイズ監視を設定する。
-     *
-     * @returns {void}
-     */
-    const tryObserveBlame = () => {
-      try {
-        const doc = iframe.contentDocument;
-        if (doc) {
-          injectBlameHandleStyle(doc);
-          observeBlameView(doc);
-        }
-      } catch {}
-    };
-    if (iframe.contentDocument?.readyState === "complete") tryObserveBlame();
-    else iframe.addEventListener("load", tryObserveBlame);
-  });
+    observePopupInDoc(doc, SELECTORS.commentPopup, syncCommentPopup);
+    observePopupInDoc(doc, SELECTORS.blamePopup, syncBlamePopup);
+    observeDiff(doc);
+    observeDiffLayoutToggles(doc);
+    observeIframes(doc);
+  }
+
+  setupDocument(document);
 })();
