@@ -1,17 +1,25 @@
 (() => {
   const STYLE_ID = "spreadsheet-wide-comment-style";
+  const COMMENT_HANDLE_CLASS = "widen-ext-comment-handle";
 
   const css = `
     .docos-anchoreddocoview {
-      width: 32vw !important;
-      min-width: 240px !important;
+      min-width: 300px !important;
       max-width: none !important;
+      overflow: hidden !important;
+      box-sizing: border-box !important;
     }
     .docos-anchoreddocoview-internal,
     .docos-anchoreddocoview-content,
     .docos-docoview-replycontainer {
       width: 100% !important;
       max-width: none !important;
+      box-sizing: border-box !important;
+    }
+    .docos-anchoreddocoview-internal {
+      height: 100% !important;
+      max-height: none !important;
+      overflow: auto !important;
     }
     .docos-docoview-input-pane,
     .docos-input-textarea {
@@ -21,6 +29,30 @@
     .docos-replyview-body {
       word-wrap: break-word !important;
       white-space: pre-wrap !important;
+    }
+    .${COMMENT_HANDLE_CLASS} {
+      position: absolute;
+      bottom: 0;
+      right: 0;
+      width: 18px;
+      height: 18px;
+      cursor: se-resize;
+      z-index: 99999;
+      box-sizing: border-box;
+      background: transparent;
+      display: flex;
+      align-items: flex-end;
+      justify-content: flex-end;
+      padding: 2px;
+      flex: none !important;
+    }
+    .${COMMENT_HANDLE_CLASS} svg {
+      pointer-events: none;
+      opacity: 0.45;
+      transition: opacity 0.15s;
+    }
+    .${COMMENT_HANDLE_CLASS}:hover svg {
+      opacity: 0.85;
     }
   `;
 
@@ -129,6 +161,106 @@
     }
   };
 
+  const renderResizeHandleIcon = () => `
+    <svg width="14" height="14" viewBox="0 0 14 14" fill="none" xmlns="http://www.w3.org/2000/svg" style="transform:rotate(90deg)">
+      <line x1="13" y1="13" x2="1"  y2="1"  stroke="#555" stroke-width="1.5" stroke-linecap="round"/>
+      <line x1="13" y1="9"  x2="5"  y2="1"  stroke="#555" stroke-width="1.5" stroke-linecap="round"/>
+      <line x1="13" y1="5"  x2="9"  y2="1"  stroke="#555" stroke-width="1.5" stroke-linecap="round"/>
+    </svg>`;
+
+  /**
+   * popup にドラッグ可能なリサイズハンドルを追加する。
+   *
+   * @param {HTMLElement} el - リサイズ対象 popup。
+   * @param {object} options - ハンドル設定。
+   * @param {string} options.handleClass - ハンドル要素に付ける class。
+   * @param {number} options.minWidth - 最小幅 px。
+   * @param {number} options.minHeight - 最小高さ px。
+   * @param {(el: HTMLElement) => void} [options.onResize] - サイズ更新後に実行する処理。
+   * @returns {void}
+   */
+  const addResizeHandle = (
+    el,
+    { handleClass, minWidth, minHeight, onResize },
+  ) => {
+    if (el.querySelector(`.${handleClass}`)) return;
+
+    // position が static なら relative に昇格してハンドルを正しく配置する
+    const computed = el.ownerDocument.defaultView?.getComputedStyle(el);
+    if (computed?.position === "static") {
+      el.style.position = "relative";
+    }
+
+    const handle = el.ownerDocument.createElement("div");
+    handle.className = handleClass;
+    handle.innerHTML = renderResizeHandleIcon();
+    el.appendChild(handle);
+
+    handle.addEventListener("pointerdown", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+
+      // Pointer Capture でハンドル自身にポインターイベントを束縛する
+      // → Google Sheets が stopPropagation しても確実に pointermove/pointerup を受け取れる
+      handle.setPointerCapture(e.pointerId);
+
+      const startX = e.clientX;
+      const startY = e.clientY;
+      const startWidth = el.offsetWidth;
+      const startHeight = el.offsetHeight;
+
+      /**
+       * pointerdown 開始位置からの差分で popup サイズを更新する。
+       *
+       * @param {PointerEvent} ev - pointermove イベント。
+       * @returns {void}
+       */
+      const onPointerMove = (ev) => {
+        const dx = ev.clientX - startX;
+        const dy = ev.clientY - startY;
+
+        const newWidth = Math.max(minWidth, startWidth + dx);
+        const newHeight = Math.max(minHeight, startHeight + dy);
+
+        el.style.setProperty("width", `${newWidth}px`, "important");
+        el.style.setProperty("height", `${newHeight}px`, "important");
+        onResize?.(el);
+      };
+
+      /**
+       * pointer capture を解放し、ドラッグ中だけ登録した listener を解除する。
+       *
+       * @param {PointerEvent} ev - pointerup または pointercancel イベント。
+       * @returns {void}
+       */
+      const onPointerUp = (ev) => {
+        handle.releasePointerCapture(ev.pointerId);
+        handle.removeEventListener("pointermove", onPointerMove);
+        handle.removeEventListener("pointerup", onPointerUp);
+        handle.removeEventListener("pointercancel", onPointerUp);
+      };
+
+      handle.addEventListener("pointermove", onPointerMove);
+      handle.addEventListener("pointerup", onPointerUp);
+      handle.addEventListener("pointercancel", onPointerUp);
+    });
+  };
+
+  /**
+   * コメント popup にドラッグ可能なリサイズハンドルを追加する。
+   *
+   * @param {HTMLElement} el - `.docos-anchoreddocoview` 要素。
+   * @returns {void}
+   */
+  const addCommentResizeHandle = (el) => {
+    addResizeHandle(el, {
+      handleClass: COMMENT_HANDLE_CLASS,
+      minWidth: 240,
+      minHeight: 160,
+      onResize: clampPosition,
+    });
+  };
+
   /**
    * document 内の既存コメント popup すべてに右端はみ出し補正を適用する。
    *
@@ -136,7 +268,10 @@
    * @returns {void}
    */
   const clampAll = (root) => {
-    root.querySelectorAll(".docos-anchoreddocoview").forEach(clampPosition);
+    root.querySelectorAll(".docos-anchoreddocoview").forEach((el) => {
+      addCommentResizeHandle(el);
+      clampPosition(el);
+    });
   };
 
   const positionObserver = new MutationObserver((mutations) => {
@@ -148,6 +283,7 @@
       ) {
         const el = mutation.target;
         if (el.classList.contains("docos-anchoreddocoview")) {
+          addCommentResizeHandle(el);
           clampPosition(el);
         }
       }
@@ -155,11 +291,13 @@
       for (const node of mutation.addedNodes) {
         if (node.nodeType !== Node.ELEMENT_NODE) continue;
         if (node.classList?.contains("docos-anchoreddocoview")) {
+          addCommentResizeHandle(node);
           clampPosition(node);
         }
-        node
-          .querySelectorAll?.(".docos-anchoreddocoview")
-          .forEach(clampPosition);
+        node.querySelectorAll?.(".docos-anchoreddocoview").forEach((el) => {
+          addCommentResizeHandle(el);
+          clampPosition(el);
+        });
       }
     }
   });
@@ -692,9 +830,7 @@
         .slice(0, fromSpanIdx)
         .reverse()
         .find(isValueNode);
-      const newValueNode = childNodes
-        .slice(fromSpanIdx + 1)
-        .find(isValueNode);
+      const newValueNode = childNodes.slice(fromSpanIdx + 1).find(isValueNode);
 
       if (!oldValueNode || !newValueNode) return;
 
@@ -876,71 +1012,12 @@
   const addBlameResizeHandle = (el) => {
     if (el.querySelector(`.${BLAME_HANDLE_CLASS}`)) return;
 
-    // position が static なら relative に昇格してハンドルを正しく配置する
-    const computed = window.getComputedStyle(el);
-    if (computed.position === "static") {
-      el.style.position = "relative";
-    }
-
     // 初期高さを設定
     el.style.setProperty("height", "200px", "important");
-
-    const handle = document.createElement("div");
-    handle.className = BLAME_HANDLE_CLASS;
-    handle.innerHTML = `
-      <svg width="14" height="14" viewBox="0 0 14 14" fill="none" xmlns="http://www.w3.org/2000/svg" style="transform:rotate(90deg)">
-        <line x1="13" y1="13" x2="1"  y2="1"  stroke="#555" stroke-width="1.5" stroke-linecap="round"/>
-        <line x1="13" y1="9"  x2="5"  y2="1"  stroke="#555" stroke-width="1.5" stroke-linecap="round"/>
-        <line x1="13" y1="5"  x2="9"  y2="1"  stroke="#555" stroke-width="1.5" stroke-linecap="round"/>
-      </svg>`;
-    el.appendChild(handle);
-
-    handle.addEventListener("pointerdown", (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-
-      // Pointer Capture でハンドル自身にポインターイベントを束縛する
-      // → Google Sheets が stopPropagation しても確実に pointermove/pointerup を受け取れる
-      handle.setPointerCapture(e.pointerId);
-
-      const startX = e.clientX;
-      const startY = e.clientY;
-      const startWidth = el.offsetWidth;
-      const startHeight = el.offsetHeight;
-
-      /**
-       * pointerdown 開始位置からの差分で popup サイズを更新する。
-       *
-       * @param {PointerEvent} ev - pointermove イベント。
-       * @returns {void}
-       */
-      const onPointerMove = (ev) => {
-        const dx = ev.clientX - startX;
-        const dy = ev.clientY - startY;
-
-        const newWidth = Math.max(200, startWidth + dx);
-        const newHeight = Math.max(120, startHeight + dy);
-
-        el.style.setProperty("width", `${newWidth}px`, "important");
-        el.style.setProperty("height", `${newHeight}px`, "important");
-      };
-
-      /**
-       * pointer capture を解放し、ドラッグ中だけ登録した listener を解除する。
-       *
-       * @param {PointerEvent} ev - pointerup または pointercancel イベント。
-       * @returns {void}
-       */
-      const onPointerUp = (ev) => {
-        handle.releasePointerCapture(ev.pointerId);
-        handle.removeEventListener("pointermove", onPointerMove);
-        handle.removeEventListener("pointerup", onPointerUp);
-        handle.removeEventListener("pointercancel", onPointerUp);
-      };
-
-      handle.addEventListener("pointermove", onPointerMove);
-      handle.addEventListener("pointerup", onPointerUp);
-      handle.addEventListener("pointercancel", onPointerUp);
+    addResizeHandle(el, {
+      handleClass: BLAME_HANDLE_CLASS,
+      minWidth: 200,
+      minHeight: 120,
     });
   };
 
