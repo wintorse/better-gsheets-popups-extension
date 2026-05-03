@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Better GSheets Popups Extension",
   "version": "1.0.0",
-  "description": "Horizontal Comment Widener for Google Sheets",
+  "description": "Widen Google Sheets comments and enhance cell edit history with resizable popups and diff views.",
   "content_scripts": [
     {
       "matches": ["https://docs.google.com/spreadsheets/*"],
