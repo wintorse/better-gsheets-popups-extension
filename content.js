@@ -24,6 +24,12 @@
     }
   `;
 
+  /**
+   * コメント popup の幅調整 CSS を指定 document に一度だけ注入する。
+   *
+   * @param {Document} doc - CSS を注入する document。Google Sheets 内 iframe の document も含む。
+   * @returns {void}
+   */
   const injectStyle = (doc) => {
     if (!doc || doc.getElementById(STYLE_ID)) return;
     const style = doc.createElement("style");
@@ -36,8 +42,25 @@
   injectStyle(document);
 
   // iframe にも注入するため MutationObserver で監視
+  /**
+   * root 配下に存在する iframe と、後から追加される iframe へコメント用 CSS を注入する。
+   *
+   * @param {Document} root - 監視対象の document。
+   * @returns {void}
+   */
   const observeIframes = (root) => {
+    /**
+     * iframe の load 後に同一 origin の document へ CSS を注入する。
+     *
+     * @param {HTMLIFrameElement} iframe - 注入対象 iframe。
+     * @returns {void}
+     */
     const injectToIframe = (iframe) => {
+      /**
+       * iframe の contentDocument が読める場合だけ CSS と nested iframe 監視を設定する。
+       *
+       * @returns {void}
+       */
       const tryInject = () => {
         try {
           const iframeDoc = iframe.contentDocument;
@@ -86,6 +109,12 @@
   const MARGIN = 16; // マージンとスクロールバー分を考慮した px
   const RIGHT_SIDEBAR_OFFSET = 56; // 右端メニューバー（56px）分
 
+  /**
+   * コメント popup が画面右端からはみ出す場合、left を左へ補正する。
+   *
+   * @param {HTMLElement} el - `.docos-anchoreddocoview` 要素。
+   * @returns {void}
+   */
   const clampPosition = (el) => {
     const rect = el.getBoundingClientRect();
     const overflowRight =
@@ -100,6 +129,12 @@
     }
   };
 
+  /**
+   * document 内の既存コメント popup すべてに右端はみ出し補正を適用する。
+   *
+   * @param {Document} root - 検索対象の document。
+   * @returns {void}
+   */
   const clampAll = (root) => {
     root.querySelectorAll(".docos-anchoreddocoview").forEach(clampPosition);
   };
@@ -129,6 +164,12 @@
     }
   });
 
+  /**
+   * document 内のコメント popup 追加と inline style 変更を監視し、位置を補正する。
+   *
+   * @param {Document} doc - 監視対象 document。
+   * @returns {void}
+   */
   const observePositionInDoc = (doc) => {
     try {
       if (!doc) return;
@@ -147,8 +188,19 @@
   observePositionInDoc(document);
 
   // iframe 内のコメントウィンドウにも適用
+  /**
+   * root 配下の iframe 内 document にもコメント popup 位置監視を設定する。
+   *
+   * @param {Document} root - iframe を検索する document。
+   * @returns {void}
+   */
   const observePositionInIframes = (root) => {
     root.querySelectorAll("iframe").forEach((iframe) => {
+      /**
+       * iframe の contentDocument が読める場合だけ位置監視を設定する。
+       *
+       * @returns {void}
+       */
       const tryObserve = () => {
         try {
           observePositionInDoc(iframe.contentDocument);
@@ -264,6 +316,12 @@
     }
   `;
 
+  /**
+   * 編集履歴 diff とレイアウト切替ボタンの CSS を指定 document に一度だけ注入する。
+   *
+   * @param {Document} doc - CSS を注入する document。
+   * @returns {void}
+   */
   const injectBlameDiffStyle = (doc) => {
     const id = "widen-ext-blame-diff-style";
     if (!doc || doc.getElementById(id)) return;
@@ -275,6 +333,11 @@
 
   injectBlameDiffStyle(document);
 
+  /**
+   * 保存済みの diff レイアウト設定を読む。
+   *
+   * @returns {"vertical" | "horizontal"} 保存値。不正値や読み取り失敗時は `"vertical"`。
+   */
   const readStoredDiffLayout = () => {
     try {
       return localStorage.getItem(BLAME_DIFF_LAYOUT_KEY) === "horizontal"
@@ -285,20 +348,47 @@
     }
   };
 
+  /**
+   * diff レイアウト設定を localStorage に保存する。
+   *
+   * @param {"vertical" | "horizontal"} layout - 保存する表示方向。
+   * @returns {void}
+   */
   const writeStoredDiffLayout = (layout) => {
     try {
       localStorage.setItem(BLAME_DIFF_LAYOUT_KEY, layout);
     } catch {}
   };
 
+  /**
+   * CSS セレクタで参照する diff レイアウト属性を document root に設定する。
+   *
+   * @param {Document} doc - 対象 document。
+   * @param {"vertical" | "horizontal"} layout - 設定する表示方向。
+   * @returns {void}
+   */
   const setDiffLayout = (doc, layout) => {
     doc.documentElement.setAttribute("data-widen-diff-layout", layout);
   };
 
   setDiffLayout(document, readStoredDiffLayout());
 
+  /**
+   * manifest で先読みしている jsdiff の global export を取得する。
+   *
+   * @returns {typeof globalThis.Diff | null} jsdiff API。読み込み失敗時は null。
+   */
   const getJsDiff = () => globalThis.Diff ?? null;
 
+  /**
+   * テキストまたは class 付き span を親要素へ追加する。
+   *
+   * @param {Document} doc - ノードを作成する document。
+   * @param {Node} parent - 追加先ノード。
+   * @param {string} text - 追加する文字列。
+   * @param {string} [className=""] - span に付与する class。空なら Text node を追加する。
+   * @returns {void}
+   */
   const appendText = (doc, parent, text, className = "") => {
     if (!text) return;
     const node = className
@@ -311,6 +401,14 @@
     parent.appendChild(node);
   };
 
+  /**
+   * jsdiff の change objects から削除側または追加側の 1 行を作る。
+   *
+   * @param {Document} doc - ノードを作成する document。
+   * @param {"del" | "add"} type - 作成する行の種類。
+   * @param {Array<{value: string, added?: boolean, removed?: boolean}>} parts - jsdiff の差分結果。
+   * @returns {HTMLSpanElement} diff 行。
+   */
   const createDiffRow = (doc, type, parts) => {
     const row = doc.createElement("span");
     row.className = `widen-diff-row widen-diff-${type}`;
@@ -330,6 +428,14 @@
     return row;
   };
 
+  /**
+   * 置換履歴用の削除行・追加行を含む diff block を作成する。
+   *
+   * @param {Document} doc - ノードを作成する document。
+   * @param {string} oldText - 変更前テキスト。
+   * @param {string} newText - 変更後テキスト。
+   * @returns {HTMLDivElement} 置換 diff block。
+   */
   const createReplacementDiffBlock = (doc, oldText, newText) => {
     const block = doc.createElement("div");
     block.className = "widen-diff-block widen-diff-replacement";
@@ -345,6 +451,12 @@
     return block;
   };
 
+  /**
+   * 現在の diff レイアウトを表す SVG アイコン文字列を返す。
+   *
+   * @param {"vertical" | "horizontal"} layout - 現在の表示方向。
+   * @returns {string} ボタン内に挿入する SVG markup。
+   */
   const renderLayoutIcon = (layout) => {
     if (layout === "horizontal") {
       return `
@@ -361,6 +473,12 @@
       </svg>`;
   };
 
+  /**
+   * document 内の diff レイアウト切替ボタンのアイコンとアクセシビリティ属性を更新する。
+   *
+   * @param {Document} doc - 更新対象 document。
+   * @returns {void}
+   */
   const updateDiffLayoutButtons = (doc) => {
     const layout =
       doc.documentElement.getAttribute("data-widen-diff-layout") || "vertical";
@@ -376,6 +494,12 @@
     });
   };
 
+  /**
+   * diff レイアウトを縦並びと横並びで切り替え、保存値とボタン表示へ反映する。
+   *
+   * @param {Document} doc - 対象 document。
+   * @returns {void}
+   */
   const toggleDiffLayout = (doc) => {
     const current =
       doc.documentElement.getAttribute("data-widen-diff-layout") || "vertical";
@@ -385,6 +509,12 @@
     updateDiffLayoutButtons(doc);
   };
 
+  /**
+   * 編集履歴の action label と切替ボタンを flex row にまとめる。
+   *
+   * @param {Element} target - `.docs-blameview-value-content` またはその中の `.docs-blame-bold-text`。
+   * @returns {void}
+   */
   const addDiffLayoutToggle = (target) => {
     const valueContent =
       target.closest?.(".docs-blameview-value-content") ?? target;
@@ -418,6 +548,12 @@
     updateDiffLayoutButtons(doc);
   };
 
+  /**
+   * 編集履歴 popup に追加される action label を監視し、diff レイアウト切替ボタンを補完する。
+   *
+   * @param {Document} root - 監視対象 document。
+   * @returns {void}
+   */
   const observeDiffLayoutToggles = (root) => {
     root
       .querySelectorAll(".docs-blameview-value-content .docs-blame-bold-text")
@@ -450,6 +586,14 @@
     } catch {}
   };
 
+  /**
+   * 追加のみ・削除のみ・中立表示の diff block を作成する。
+   *
+   * @param {Document} doc - ノードを作成する document。
+   * @param {"add" | "del" | "neutral"} type - diff 行の種類。
+   * @param {string} content - 表示するテキスト。
+   * @returns {HTMLDivElement} 単一行 diff block。
+   */
   const createSingleDiffBlock = (doc, type, content) => {
     const block = doc.createElement("div");
     block.className = "widen-diff-block";
@@ -470,7 +614,15 @@
     return block;
   };
 
-  // valueContent 内から旧テキスト・新テキストを抽出してgit-diff風に再描画
+  /**
+   * Google Sheets の編集履歴値 DOM を読み取り、差分表示用 DOM に置き換える。
+   *
+   * 通常セルは text node、数式セルは `.waffle-blameview-formula-text` に値が入るため、
+   * どちらも同じ抽出処理に流す。再描画済みの要素は属性でスキップする。
+   *
+   * @param {Element} valueContent - `.docs-blameview-value-content` 要素。
+   * @returns {void}
+   */
   const transformDiff = (valueContent) => {
     if (valueContent.hasAttribute(BLAME_DIFF_ATTR)) return;
     if (valueContent.querySelector(".widen-diff-block")) {
@@ -481,8 +633,19 @@
 
     // 直下テキストノードを順にたどる
     const childNodes = Array.from(valueContent.childNodes);
-    // 引用符を除去する
+    /**
+     * Google Sheets が通常値の外側に付ける引用符を除去する。
+     *
+     * @param {string} s - 元文字列。
+     * @returns {string} 前後空白と外側 quote を除いた文字列。
+     */
     const strip = (s) => s.trim().replace(/^["「]|["」]$/g, "");
+    /**
+     * 編集履歴の値として扱える直下ノードか判定する。
+     *
+     * @param {Node} node - `.docs-blameview-value-content` の直下ノード。
+     * @returns {boolean} 通常値 text node または数式値 span なら true。
+     */
     const isValueNode = (node) => {
       if (node.nodeType === Node.TEXT_NODE) {
         return strip(node.textContent).length > 0;
@@ -493,6 +656,15 @@
         node.textContent.trim()
       );
     };
+    /**
+     * 値ノードから diff に渡す文字列を取り出す。
+     *
+     * 数式 span の中にあるダブルクォートは数式本体なので保持し、
+     * 通常 text node では Google Sheets が外側に付ける引用符だけを除去する。
+     *
+     * @param {Node} node - 値として扱うノード。
+     * @returns {string} diff 対象文字列。
+     */
     const valueText = (node) => {
       if (
         node.nodeType === Node.ELEMENT_NODE &&
@@ -587,6 +759,12 @@
     }
   };
 
+  /**
+   * 編集履歴 value content の追加・更新を監視し、差分表示へ変換する。
+   *
+   * @param {Document} root - 監視対象 document。
+   * @returns {void}
+   */
   const observeDiff = (root) => {
     injectBlameDiffStyle(root.ownerDocument || root);
 
@@ -672,6 +850,12 @@
     }
   `;
 
+  /**
+   * 編集履歴 popup のリサイズハンドル CSS を指定 document に一度だけ注入する。
+   *
+   * @param {Document} doc - CSS を注入する document。
+   * @returns {void}
+   */
   const injectBlameHandleStyle = (doc) => {
     const id = "widen-ext-blame-handle-style";
     if (!doc || doc.getElementById(id)) return;
@@ -683,6 +867,12 @@
 
   injectBlameHandleStyle(document);
 
+  /**
+   * 編集履歴 popup にドラッグ可能なリサイズハンドルを追加する。
+   *
+   * @param {HTMLElement} el - `.waffle-blameview` 要素。
+   * @returns {void}
+   */
   const addBlameResizeHandle = (el) => {
     if (el.querySelector(`.${BLAME_HANDLE_CLASS}`)) return;
 
@@ -718,6 +908,12 @@
       const startWidth = el.offsetWidth;
       const startHeight = el.offsetHeight;
 
+      /**
+       * pointerdown 開始位置からの差分で popup サイズを更新する。
+       *
+       * @param {PointerEvent} ev - pointermove イベント。
+       * @returns {void}
+       */
       const onPointerMove = (ev) => {
         const dx = ev.clientX - startX;
         const dy = ev.clientY - startY;
@@ -729,6 +925,12 @@
         el.style.setProperty("height", `${newHeight}px`, "important");
       };
 
+      /**
+       * pointer capture を解放し、ドラッグ中だけ登録した listener を解除する。
+       *
+       * @param {PointerEvent} ev - pointerup または pointercancel イベント。
+       * @returns {void}
+       */
       const onPointerUp = (ev) => {
         handle.releasePointerCapture(ev.pointerId);
         handle.removeEventListener("pointermove", onPointerMove);
@@ -742,6 +944,12 @@
     });
   };
 
+  /**
+   * 編集履歴 popup の追加を監視し、各 popup にリサイズハンドルを追加する。
+   *
+   * @param {Document} root - 監視対象 document。
+   * @returns {void}
+   */
   const observeBlameView = (root) => {
     // 既存の要素に適用
     root.querySelectorAll(".waffle-blameview").forEach(addBlameResizeHandle);
@@ -775,6 +983,11 @@
 
   // iframe 内にも適用
   document.querySelectorAll("iframe").forEach((iframe) => {
+    /**
+     * iframe の contentDocument が読める場合だけ編集履歴 popup のリサイズ監視を設定する。
+     *
+     * @returns {void}
+     */
     const tryObserveBlame = () => {
       try {
         const doc = iframe.contentDocument;
