@@ -17,8 +17,11 @@
       box-sizing: border-box !important;
     }
     .docos-anchoreddocoview-internal {
-      height: 100% !important;
       max-height: none !important;
+      overflow: visible !important;
+    }
+    .docos-anchoreddocoview-content {
+      min-height: 0 !important;
       overflow: auto !important;
     }
     .docos-docoview-input-pane,
@@ -305,6 +308,9 @@
       handleClass: COMMENT_HANDLE_CLASS,
       minWidth: 240,
       minHeight: 160,
+      // コメント popup は入力欄なども含むため、高さ変更は本文 content だけに限定する。
+      getHeightTarget: (popup) =>
+        popup.querySelector(".docos-anchoreddocoview-content") ?? popup,
       onResize: clampPosition,
     });
   };
