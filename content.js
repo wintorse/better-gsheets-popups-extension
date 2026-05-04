@@ -124,7 +124,7 @@
     leftEdgeOffset: 16,
     margin: 16,
     rightSidebarOffset: 56,
-    bottomEdgeOffset: 48,
+    bottomEdgeOffset: 56,
   };
 
   /**
