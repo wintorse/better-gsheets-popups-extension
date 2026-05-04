@@ -1,20 +1,8 @@
 (() => {
   "use strict";
 
-  const STORAGE_KEYS = {
-    commentWidth: "widen-ext-comment-default-width",
-    blameWidth: "widen-ext-blame-default-width",
-  };
-
-  const DEFAULTS = {
-    commentWidth: 300,
-    blameWidth: 320,
-  };
-
-  const LIMITS = {
-    commentWidth: { min: 282, max: 1600 },
-    blameWidth: { min: 240, max: 1600 },
-  };
+  const { storageKeys: STORAGE_KEYS, defaults: DEFAULTS, limits: LIMITS } =
+    globalThis.WIDEN_POPUP_WIDTH_SETTINGS;
 
   const form = {
     commentWidth: document.getElementById("commentWidth"),
@@ -40,6 +28,13 @@
   const setFormValues = (settings) => {
     form.commentWidth.value = String(settings.commentWidth);
     form.blameWidth.value = String(settings.blameWidth);
+  };
+
+  const applyInputLimits = () => {
+    form.commentWidth.min = String(LIMITS.commentWidth.min);
+    form.commentWidth.max = String(LIMITS.commentWidth.max);
+    form.blameWidth.min = String(LIMITS.blameWidth.min);
+    form.blameWidth.max = String(LIMITS.blameWidth.max);
   };
 
   const readSettings = () =>
@@ -79,6 +74,7 @@
 
   const initialize = async () => {
     try {
+      applyInputLimits();
       setFormValues(await readSettings());
       setStatus("");
     } catch {

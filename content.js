@@ -94,14 +94,25 @@
   const BLAME_DIFF_LAYOUT_KEY = "widen-ext-blame-diff-layout";
 
   /**
+   * popup デフォルト幅設定の共有定義。
+   *
+   * @type {{
+   *   storageKeys: {commentWidth: string, blameWidth: string},
+   *   defaults: {commentWidth: number, blameWidth: number},
+   *   limits: {
+   *     commentWidth: {min: number, max: number},
+   *     blameWidth: {min: number, max: number}
+   *   }
+   * }}
+   */
+  const POPUP_WIDTH_SETTINGS = globalThis.WIDEN_POPUP_WIDTH_SETTINGS;
+
+  /**
    * popup デフォルト幅設定を chrome.storage に保存するためのキー。
    *
    * @type {{commentWidth: string, blameWidth: string}}
    */
-  const POPUP_WIDTH_STORAGE_KEYS = {
-    commentWidth: "widen-ext-comment-default-width",
-    blameWidth: "widen-ext-blame-default-width",
-  };
+  const POPUP_WIDTH_STORAGE_KEYS = POPUP_WIDTH_SETTINGS.storageKeys;
 
   /**
    * 編集履歴の action label 横に追加する diff レイアウト切替ボタンの class。
@@ -144,7 +155,7 @@
    *
    * @type {number}
    */
-  const COMMENT_MIN_WIDTH = 282;
+  const COMMENT_MIN_WIDTH = POPUP_WIDTH_SETTINGS.limits.commentWidth.min;
 
   /**
    * コメント popup を開いたときに適用するデフォルトの幅 (px)。
@@ -153,7 +164,7 @@
    *
    * @type {number}
    */
-  const COMMENT_DEFAULT_WIDTH = 300;
+  const COMMENT_DEFAULT_WIDTH = POPUP_WIDTH_SETTINGS.defaults.commentWidth;
 
   /**
    * コメント popup をリサイズできる最小の高さ (px)。
@@ -173,7 +184,7 @@
    *
    * @type {number}
    */
-  const BLAME_DEFAULT_WIDTH = 320;
+  const BLAME_DEFAULT_WIDTH = POPUP_WIDTH_SETTINGS.defaults.blameWidth;
 
   /**
    * 編集履歴 popup の最小幅 (px)。
@@ -182,14 +193,21 @@
    *
    * @type {number}
    */
-  const BLAME_MIN_WIDTH = 240;
+  const BLAME_MIN_WIDTH = POPUP_WIDTH_SETTINGS.limits.blameWidth.min;
 
   /**
-   * popup デフォルト幅設定として受け入れる最大幅 (px)。
+   * コメント popup のデフォルト幅設定として受け入れる最大幅 (px)。
    *
    * @type {number}
    */
-  const POPUP_WIDTH_MAX = 1600;
+  const COMMENT_MAX_WIDTH = POPUP_WIDTH_SETTINGS.limits.commentWidth.max;
+
+  /**
+   * 編集履歴 popup のデフォルト幅設定として受け入れる最大幅 (px)。
+   *
+   * @type {number}
+   */
+  const BLAME_MAX_WIDTH = POPUP_WIDTH_SETTINGS.limits.blameWidth.max;
 
   /**
    * コメント popup に現在適用済みのデフォルト幅を記録する data 属性名。
@@ -556,18 +574,16 @@
    * @param {unknown} value - 保存値または入力値。
    * @param {number} fallback - 不正値の場合に使う値。
    * @param {number} minWidth - 許容する最小幅。
+   * @param {number} maxWidth - 許容する最大幅。
    * @returns {number} 設定として使える幅。
    */
-  const normalizePopupWidth = (value, fallback, minWidth) => {
+  const normalizePopupWidth = (value, fallback, minWidth, maxWidth) => {
     const numericValue =
       typeof value === "number" ? value : Number.parseInt(String(value), 10);
 
     if (!Number.isFinite(numericValue)) return fallback;
 
-    return Math.min(
-      POPUP_WIDTH_MAX,
-      Math.max(minWidth, Math.round(numericValue)),
-    );
+    return Math.min(maxWidth, Math.max(minWidth, Math.round(numericValue)));
   };
 
   /**
@@ -602,11 +618,13 @@
             items?.[POPUP_WIDTH_STORAGE_KEYS.commentWidth],
             COMMENT_DEFAULT_WIDTH,
             COMMENT_MIN_WIDTH,
+            COMMENT_MAX_WIDTH,
           ),
           blameWidth: normalizePopupWidth(
             items?.[POPUP_WIDTH_STORAGE_KEYS.blameWidth],
             BLAME_DEFAULT_WIDTH,
             BLAME_MIN_WIDTH,
+            BLAME_MAX_WIDTH,
           ),
         };
         resolve();
@@ -649,7 +667,11 @@
     appliedAttr,
     force = false,
   ) => {
-    const nextWidth = normalizePopupWidth(width, width, minWidth);
+    const maxWidth =
+      appliedAttr === COMMENT_DEFAULT_WIDTH_ATTR
+        ? COMMENT_MAX_WIDTH
+        : BLAME_MAX_WIDTH;
+    const nextWidth = normalizePopupWidth(width, width, minWidth, maxWidth);
     const nextValue = String(nextWidth);
 
     if (!force && element.getAttribute(appliedAttr) === nextValue) return;
@@ -1671,6 +1693,7 @@
                   commentChange.newValue,
                   COMMENT_DEFAULT_WIDTH,
                   COMMENT_MIN_WIDTH,
+                  COMMENT_MAX_WIDTH,
                 )
               : popupWidthSettings.commentWidth,
             blameWidth: blameChange
@@ -1678,6 +1701,7 @@
                   blameChange.newValue,
                   BLAME_DEFAULT_WIDTH,
                   BLAME_MIN_WIDTH,
+                  BLAME_MAX_WIDTH,
                 )
               : popupWidthSettings.blameWidth,
           };
