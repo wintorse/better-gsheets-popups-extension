@@ -94,6 +94,27 @@
   const BLAME_DIFF_LAYOUT_KEY = "widen-ext-blame-diff-layout";
 
   /**
+   * popup デフォルト幅設定の共有定義。
+   *
+   * @type {{
+   *   storageKeys: {commentWidth: string, blameWidth: string},
+   *   defaults: {commentWidth: number, blameWidth: number},
+   *   limits: {
+   *     commentWidth: {min: number, max: number},
+   *     blameWidth: {min: number, max: number}
+   *   }
+   * }}
+   */
+  const POPUP_WIDTH_SETTINGS = globalThis.WIDEN_POPUP_WIDTH_SETTINGS;
+
+  /**
+   * popup デフォルト幅設定を chrome.storage に保存するためのキー。
+   *
+   * @type {{commentWidth: string, blameWidth: string}}
+   */
+  const POPUP_WIDTH_STORAGE_KEYS = POPUP_WIDTH_SETTINGS.storageKeys;
+
+  /**
    * 編集履歴の action label 横に追加する diff レイアウト切替ボタンの class。
    *
    * @type {string}
@@ -124,7 +145,7 @@
     leftEdgeOffset: 16,
     margin: 16,
     rightSidebarOffset: 56,
-    bottomEdgeOffset: 48,
+    bottomEdgeOffset: 56,
   };
 
   /**
@@ -134,7 +155,16 @@
    *
    * @type {number}
    */
-  const COMMENT_MIN_WIDTH = 282;
+  const COMMENT_MIN_WIDTH = POPUP_WIDTH_SETTINGS.limits.commentWidth.min;
+
+  /**
+   * コメント popup を開いたときに適用するデフォルトの幅 (px)。
+   *
+   * 設定が未保存または不正な場合の fallback として使う。
+   *
+   * @type {number}
+   */
+  const COMMENT_DEFAULT_WIDTH = POPUP_WIDTH_SETTINGS.defaults.commentWidth;
 
   /**
    * コメント popup をリサイズできる最小の高さ (px)。
@@ -147,14 +177,14 @@
   const COMMENT_MIN_HEIGHT = 103;
 
   /**
-   * 編集履歴 popup を開き直したときに戻す初期幅 (px)。
+   * 編集履歴 popup を開き直したときに戻すデフォルトの幅 (px)。
    *
    * `.waffle-blameview` は閉じても DOM が残るため、手動リサイズ後の inline width を
    * 次回表示へ持ち越さないようにする。
    *
    * @type {number}
    */
-  const BLAME_DEFAULT_WIDTH = 320;
+  const BLAME_DEFAULT_WIDTH = POPUP_WIDTH_SETTINGS.defaults.blameWidth;
 
   /**
    * 編集履歴 popup の最小幅 (px)。
@@ -163,7 +193,35 @@
    *
    * @type {number}
    */
-  const BLAME_MIN_WIDTH = 240;
+  const BLAME_MIN_WIDTH = POPUP_WIDTH_SETTINGS.limits.blameWidth.min;
+
+  /**
+   * コメント popup のデフォルト幅設定として受け入れる最大幅 (px)。
+   *
+   * @type {number}
+   */
+  const COMMENT_MAX_WIDTH = POPUP_WIDTH_SETTINGS.limits.commentWidth.max;
+
+  /**
+   * 編集履歴 popup のデフォルト幅設定として受け入れる最大幅 (px)。
+   *
+   * @type {number}
+   */
+  const BLAME_MAX_WIDTH = POPUP_WIDTH_SETTINGS.limits.blameWidth.max;
+
+  /**
+   * コメント popup に現在適用済みのデフォルト幅を記録する data 属性名。
+   *
+   * @type {string}
+   */
+  const COMMENT_DEFAULT_WIDTH_ATTR = "data-widen-comment-default-width";
+
+  /**
+   * 編集履歴 popup に現在適用済みのデフォルト幅を記録する data 属性名。
+   *
+   * @type {string}
+   */
+  const BLAME_DEFAULT_WIDTH_ATTR = "data-widen-blame-default-width";
 
   /**
    * 編集履歴本文領域の既定 max-height (px)。
@@ -233,6 +291,23 @@
    * @type {WeakSet<HTMLElement>}
    */
   const scheduledBlameBottomClamps = new WeakSet();
+
+  /**
+   * setup 済み document を storage 変更時に再同期するために保持する。
+   *
+   * @type {Set<Document>}
+   */
+  const activeDocuments = new Set();
+
+  /**
+   * popup デフォルト幅の現在設定。
+   *
+   * @type {{commentWidth: number, blameWidth: number}}
+   */
+  let popupWidthSettings = {
+    commentWidth: COMMENT_DEFAULT_WIDTH,
+    blameWidth: BLAME_DEFAULT_WIDTH,
+  };
 
   /**
    * リサイズハンドル用の共通 CSS を生成する。
@@ -491,6 +566,118 @@
     } catch {
       return null;
     }
+  };
+
+  /**
+   * 幅設定値を安全な px 数値へ丸める。
+   *
+   * @param {unknown} value - 保存値または入力値。
+   * @param {number} fallback - 不正値の場合に使う値。
+   * @param {number} minWidth - 許容する最小幅。
+   * @param {number} maxWidth - 許容する最大幅。
+   * @returns {number} 設定として使える幅。
+   */
+  const normalizePopupWidth = (value, fallback, minWidth, maxWidth) => {
+    const numericValue =
+      typeof value === "number" ? value : Number.parseInt(String(value), 10);
+
+    if (!Number.isFinite(numericValue)) return fallback;
+
+    return Math.min(maxWidth, Math.max(minWidth, Math.round(numericValue)));
+  };
+
+  /**
+   * chrome.storage.sync を安全に取得する。
+   *
+   * @returns {chrome.storage.StorageArea | null} 利用可能な storage。通常ページでは null。
+   */
+  const getSyncStorage = () => {
+    try {
+      return globalThis.chrome?.storage?.sync ?? null;
+    } catch {
+      return null;
+    }
+  };
+
+  /**
+   * 保存済みの popup デフォルト幅設定を読み込む。
+   *
+   * @returns {Promise<void>} 読み込み完了 Promise。
+   */
+  const loadPopupWidthSettings = () =>
+    new Promise((resolve) => {
+      const storage = getSyncStorage();
+      if (!storage) {
+        resolve();
+        return;
+      }
+
+      storage.get(Object.values(POPUP_WIDTH_STORAGE_KEYS), (items) => {
+        popupWidthSettings = {
+          commentWidth: normalizePopupWidth(
+            items?.[POPUP_WIDTH_STORAGE_KEYS.commentWidth],
+            COMMENT_DEFAULT_WIDTH,
+            COMMENT_MIN_WIDTH,
+            COMMENT_MAX_WIDTH,
+          ),
+          blameWidth: normalizePopupWidth(
+            items?.[POPUP_WIDTH_STORAGE_KEYS.blameWidth],
+            BLAME_DEFAULT_WIDTH,
+            BLAME_MIN_WIDTH,
+            BLAME_MAX_WIDTH,
+          ),
+        };
+        resolve();
+      });
+    });
+
+  /**
+   * popup が画面上に表示されているか判定する。
+   *
+   * @param {HTMLElement} element - 判定対象 popup。
+   * @returns {boolean} 表示中なら true。
+   */
+  const isPopupVisible = (element) => {
+    if (!element.isConnected) return false;
+
+    const rect = element.getBoundingClientRect();
+    const style = element.ownerDocument.defaultView?.getComputedStyle(element);
+    return (
+      rect.width > 0 &&
+      rect.height > 0 &&
+      style?.display !== "none" &&
+      style?.visibility !== "hidden"
+    );
+  };
+
+  /**
+   * popup を開いたときのデフォルト幅を一度だけ適用する。
+   *
+   * @param {HTMLElement} element - 幅を適用する popup。
+   * @param {number} width - 適用するデフォルト幅。
+   * @param {number} minWidth - 最小幅。
+   * @param {string} appliedAttr - 適用済み幅を保持する data 属性名。
+   * @param {boolean} [force=false] - 既に適用済みでも再適用するか。
+   * @returns {void}
+   */
+  const applyDefaultPopupWidth = (
+    element,
+    width,
+    minWidth,
+    appliedAttr,
+    force = false,
+  ) => {
+    const maxWidth =
+      appliedAttr === COMMENT_DEFAULT_WIDTH_ATTR
+        ? COMMENT_MAX_WIDTH
+        : BLAME_MAX_WIDTH;
+    const nextWidth = normalizePopupWidth(width, width, minWidth, maxWidth);
+    const nextValue = String(nextWidth);
+
+    if (!force && element.getAttribute(appliedAttr) === nextValue) return;
+
+    element.style.setProperty("width", `${nextWidth}px`, "important");
+    element.setAttribute(appliedAttr, nextValue);
   };
 
   /**
@@ -774,6 +961,17 @@
    * @returns {void}
    */
   const syncCommentPopup = (element) => {
+    if (isPopupVisible(element)) {
+      applyDefaultPopupWidth(
+        element,
+        popupWidthSettings.commentWidth,
+        COMMENT_MIN_WIDTH,
+        COMMENT_DEFAULT_WIDTH_ATTR,
+      );
+    } else {
+      element.removeAttribute(COMMENT_DEFAULT_WIDTH_ATTR);
+    }
+
     addResizeHandle(element, {
       handleClass: COMMENT_HANDLE_CLASS,
       minWidth: COMMENT_MIN_WIDTH,
@@ -1314,10 +1512,14 @@
    * @returns {void}
    */
   const resetBlamePopupState = (element) => {
-    const width = `${BLAME_DEFAULT_WIDTH}px`;
+    const width = `${popupWidthSettings.blameWidth}px`;
     if (element.style.getPropertyValue("width") !== width) {
       element.style.setProperty("width", width, "important");
     }
+    element.setAttribute(
+      BLAME_DEFAULT_WIDTH_ATTR,
+      String(popupWidthSettings.blameWidth),
+    );
 
     const blameView = element.querySelector(SELECTORS.blameView);
     if (blameView?.style.getPropertyValue("width") !== "100%") {
@@ -1338,16 +1540,7 @@
    * @returns {boolean} 表示中なら true。
    */
   const isBlamePopupVisible = (element) => {
-    if (!element.isConnected) return false;
-
-    const rect = element.getBoundingClientRect();
-    const style = element.ownerDocument.defaultView?.getComputedStyle(element);
-    return (
-      rect.width > 0 &&
-      rect.height > 0 &&
-      style?.display !== "none" &&
-      style?.visibility !== "hidden"
-    );
+    return isPopupVisible(element);
   };
 
   /**
@@ -1450,6 +1643,118 @@
   };
 
   /**
+   * 現在表示中または DOM に残っている popup へ設定変更を反映する。
+   *
+   * @param {Document} doc - 反映対象 document。
+   * @returns {void}
+   */
+  const applyPopupWidthSettingsInDocument = (doc) => {
+    doc.querySelectorAll(SELECTORS.commentPopup).forEach((element) => {
+      applyDefaultPopupWidth(
+        /** @type {HTMLElement} */ (element),
+        popupWidthSettings.commentWidth,
+        COMMENT_MIN_WIDTH,
+        COMMENT_DEFAULT_WIDTH_ATTR,
+        true,
+      );
+      clampPopupBounds(/** @type {HTMLElement} */ (element));
+    });
+
+    doc.querySelectorAll(SELECTORS.blamePopup).forEach((element) => {
+      applyDefaultPopupWidth(
+        /** @type {HTMLElement} */ (element),
+        popupWidthSettings.blameWidth,
+        BLAME_MIN_WIDTH,
+        BLAME_DEFAULT_WIDTH_ATTR,
+        true,
+      );
+      syncBlameResizeBounds(/** @type {HTMLElement} */ (element));
+    });
+  };
+
+  /**
+   * storage 変更の再同期対象として残してよい document かを判定する。
+   *
+   * @param {Document} doc - 判定対象 document。
+   * @returns {boolean} 接続中の document なら true。
+   */
+  const isActiveDocument = (doc) => {
+    const view = doc.defaultView;
+    if (!view) return false;
+
+    if (view === window) {
+      return doc.documentElement.isConnected;
+    }
+
+    try {
+      const frameElement = view.frameElement;
+      return Boolean(frameElement?.isConnected);
+    } catch {
+      return false;
+    }
+  };
+
+  /**
+   * storage 変更時の再同期対象から切断済み document を取り除く。
+   *
+   * @returns {Document[]} 接続中の document。
+   */
+  const pruneActiveDocuments = () => {
+    const documents = [];
+
+    activeDocuments.forEach((doc) => {
+      if (!isActiveDocument(doc)) {
+        activeDocuments.delete(doc);
+        return;
+      }
+
+      documents.push(doc);
+    });
+
+    return documents;
+  };
+
+  /**
+   * chrome.storage の設定変更を content script に反映する。
+   *
+   * @returns {void}
+   */
+  const observePopupWidthSettings = () => {
+    try {
+      globalThis.chrome?.storage?.onChanged?.addListener(
+        (changes, areaName) => {
+          if (areaName !== "sync") return;
+
+          const commentChange = changes[POPUP_WIDTH_STORAGE_KEYS.commentWidth];
+          const blameChange = changes[POPUP_WIDTH_STORAGE_KEYS.blameWidth];
+          if (!commentChange && !blameChange) return;
+
+          popupWidthSettings = {
+            commentWidth: commentChange
+              ? normalizePopupWidth(
+                  commentChange.newValue,
+                  COMMENT_DEFAULT_WIDTH,
+                  COMMENT_MIN_WIDTH,
+                  COMMENT_MAX_WIDTH,
+                )
+              : popupWidthSettings.commentWidth,
+            blameWidth: blameChange
+              ? normalizePopupWidth(
+                  blameChange.newValue,
+                  BLAME_DEFAULT_WIDTH,
+                  BLAME_MIN_WIDTH,
+                  BLAME_MAX_WIDTH,
+                )
+              : popupWidthSettings.blameWidth,
+          };
+
+          pruneActiveDocuments().forEach(applyPopupWidthSettingsInDocument);
+        },
+      );
+    } catch {}
+  };
+
+  /**
    * 1 つの document に、この拡張が必要とする style と DOM 監視を設定する。
    *
    * @param {Document} doc - 対象 document。
@@ -1458,6 +1763,7 @@
   function setupDocument(doc) {
     if (!doc || initializedDocuments.has(doc)) return;
     initializedDocuments.add(doc);
+    activeDocuments.add(doc);
 
     injectCSS(doc, STYLE_IDS.comment, commentCSS);
     injectCSS(doc, STYLE_IDS.diff, diffCSS);
@@ -1471,5 +1777,6 @@
     observeIframes(doc);
   }
 
-  setupDocument(document);
+  observePopupWidthSettings();
+  loadPopupWidthSettings().finally(() => setupDocument(document));
 })();

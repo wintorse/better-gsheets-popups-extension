@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Better GSheets Popups</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <main class="popup">
+      <h1>デフォルトの幅</h1>
+
+      <label class="field">
+        <span>コメント</span>
+        <span class="input-unit">
+          <input
+            id="commentWidth"
+            type="number"
+            step="1"
+            inputmode="numeric"
+          />
+          <span aria-hidden="true">px</span>
+        </span>
+      </label>
+
+      <label class="field">
+        <span>編集履歴</span>
+        <span class="input-unit">
+          <input
+            id="blameWidth"
+            type="number"
+            step="1"
+            inputmode="numeric"
+          />
+          <span aria-hidden="true">px</span>
+        </span>
+      </label>
+
+      <p id="status" class="status" role="status" aria-live="polite"></p>
+
+      <div class="actions">
+        <button id="reset" type="button" class="secondary">リセット</button>
+        <button id="save" type="button" class="primary">保存</button>
+      </div>
+    </main>
+    <script src="popupSettings.js" defer></script>
+    <script src="popup.js" defer></script>
+  </body>
+</html>
