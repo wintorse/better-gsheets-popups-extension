@@ -1673,6 +1673,48 @@
   };
 
   /**
+   * storage 変更の再同期対象として残してよい document かを判定する。
+   *
+   * @param {Document} doc - 判定対象 document。
+   * @returns {boolean} 接続中の document なら true。
+   */
+  const isActiveDocument = (doc) => {
+    const view = doc.defaultView;
+    if (!view) return false;
+
+    if (view === window) {
+      return doc.documentElement.isConnected;
+    }
+
+    try {
+      const frameElement = view.frameElement;
+      return Boolean(frameElement?.isConnected);
+    } catch {
+      return false;
+    }
+  };
+
+  /**
+   * storage 変更時の再同期対象から切断済み document を取り除く。
+   *
+   * @returns {Document[]} 接続中の document。
+   */
+  const pruneActiveDocuments = () => {
+    const documents = [];
+
+    activeDocuments.forEach((doc) => {
+      if (!isActiveDocument(doc)) {
+        activeDocuments.delete(doc);
+        return;
+      }
+
+      documents.push(doc);
+    });
+
+    return documents;
+  };
+
+  /**
    * chrome.storage の設定変更を content script に反映する。
    *
    * @returns {void}
@@ -1706,7 +1748,7 @@
               : popupWidthSettings.blameWidth,
           };
 
-          activeDocuments.forEach(applyPopupWidthSettingsInDocument);
+          pruneActiveDocuments().forEach(applyPopupWidthSettingsInDocument);
         },
       );
     } catch {}
