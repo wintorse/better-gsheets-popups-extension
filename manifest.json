@@ -3,6 +3,14 @@
   "name": "Better GSheets Popups Extension",
   "version": "1.0.0",
   "description": "Widen Google Sheets comments and enhance cell edit history with resizable popups and diff views.",
+  "permissions": ["storage"],
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "48": "icon48.png",
+      "128": "icon128.png"
+    }
+  },
   "content_scripts": [
     {
       "matches": ["https://docs.google.com/spreadsheets/*"],
