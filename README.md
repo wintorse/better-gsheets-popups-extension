@@ -1,3 +1,8 @@
+> [!IMPORTANT]
+> WXT を使って作り直しました！
+> 
+> https://github.com/wintorse/sheets-popup-enhancer
+
 # Better GSheets Popups Extension
 
 Google スプレッドシートのコメント、セルの編集履歴を見やすくする Chrome 拡張機能
